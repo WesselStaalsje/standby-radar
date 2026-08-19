@@ -22,6 +22,7 @@ const CHANGE_CONFIRM_MS = 5 * 60 * 1000;
 const CHANGE_MARGIN = 15;
 const EMERGENCY_SCORE = 80;
 const MAX_RESTORE_AGE_MS = 2 * 60 * 60 * 1000;
+const AUTO_REFRESH_MS = 30_000;
 
 const colors: Record<TrafficKind, string> = {
   traffic: "#f1a34b", accident: "#e44c4c", obstruction: "#df7a43",
@@ -78,6 +79,8 @@ export function RadarDashboard() {
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const layerRef = useRef<LayerGroup | null>(null);
   const requestSeq = useRef(0);
+  const inFlightRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
   const lastGoodAdvice = useRef<StandbyAdvice[]>([]);
   const stabilityRef = useRef<StabilityState>({ loaded: false, advice: [], since: 0, pendingSignature: null, pendingSince: null });
 
@@ -87,6 +90,8 @@ export function RadarDashboard() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [autoUpdating, setAutoUpdating] = useState(false);
+  const [nextRefreshAt, setNextRefreshAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [filters, setFilters] = useState<Filters>({ traffic: true, incidents: true, works: false, advice: true });
@@ -101,35 +106,67 @@ export function RadarDashboard() {
   }, []);
 
   const load = useCallback(async (manual = false) => {
+    if (inFlightRef.current) return false;
+    inFlightRef.current = true;
     const seq = ++requestSeq.current;
     if (manual) setRefreshing(true);
+    else setAutoUpdating(true);
+
     try {
       let payload = await fetchPayload();
       const shouldHaveAdvice = payload.meta.segmentCount > 0 && payload.meta.candidateLocationCount > 0;
       if (shouldHaveAdvice && payload.advice.length === 0) {
         await new Promise(resolve => window.setTimeout(resolve, 900));
-        if (seq !== requestSeq.current) return;
         payload = await fetchPayload();
       }
-      if (seq !== requestSeq.current) return;
+      if (seq !== requestSeq.current) return false;
 
       if (payload.advice.length) lastGoodAdvice.current = payload.advice;
       const effectiveAdvice = payload.advice.length ? payload.advice : lastGoodAdvice.current;
       setData(effectiveAdvice === payload.advice ? payload : { ...payload, advice: effectiveAdvice });
       setSelectedId(current => current && effectiveAdvice.some(a => a.id === current) ? current : effectiveAdvice[0]?.id ?? null);
       setError(shouldHaveAdvice && payload.advice.length === 0 ? "De live brondata is binnen, maar de stand-byselectie leverde tijdelijk geen locaties op. De laatste geldige adviezen blijven zichtbaar." : null);
+      return true;
     } catch (e) {
       if (seq === requestSeq.current) setError(e instanceof Error ? e.message : "Live data kon niet geladen worden");
+      return false;
     } finally {
-      if (seq === requestSeq.current) { setLoading(false); setRefreshing(false); }
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setRefreshing(false);
+        setAutoUpdating(false);
+      }
+      inFlightRef.current = false;
     }
   }, [fetchPayload]);
 
   useEffect(() => {
-    void load();
-    const refresh = window.setInterval(() => void load(), 30_000);
+    let cancelled = false;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const due = Date.now() + AUTO_REFRESH_MS;
+      setNextRefreshAt(due);
+      refreshTimerRef.current = window.setTimeout(async () => {
+        if (cancelled) return;
+        setNextRefreshAt(null);
+        await load(false);
+        if (!cancelled) scheduleNext();
+      }, AUTO_REFRESH_MS);
+    };
+
+    void (async () => {
+      setNextRefreshAt(null);
+      await load(false);
+      if (!cancelled) scheduleNext();
+    })();
+
     const tick = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => { clearInterval(refresh); clearInterval(tick); };
+    return () => {
+      cancelled = true;
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+      clearInterval(tick);
+    };
   }, [load]);
 
   useEffect(() => {
@@ -231,9 +268,7 @@ export function RadarDashboard() {
     const holdAge = currentTime - state.since;
     if (holdAge < MIN_HOLD_MS) {
       state.pendingSignature = rawSignature || "none";
-      state.pendingSince = state.pendingSignature === (stabilityRef.current.pendingSignature ?? null) && state.pendingSince
-        ? state.pendingSince
-        : currentTime;
+      state.pendingSince = null;
       publish();
       return;
     }
@@ -313,8 +348,7 @@ export function RadarDashboard() {
   const selectedHistory = useMemo(() => selected ? historyFor(selected, history) : null, [selected, history]);
   const activeStandby = stableStandby;
   const activeUnitCount = activeStandby.reduce((sum, advice) => sum + advice.recommendedUnits, 0);
-  const age = data ? Math.max(0, Math.floor((now - new Date(data.generatedAt).getTime()) / 1000)) : 0;
-  const next = Math.max(0, (data?.refreshAfterSeconds ?? 30) - age);
+  const next = nextRefreshAt ? Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)) : 0;
   const holdRemaining = stableSince ? Math.max(0, MIN_HOLD_MS - (now - stableSince)) : 0;
   const pendingRemaining = pendingSince ? Math.max(0, CHANGE_CONFIRM_MS - (now - pendingSince)) : 0;
   const focus = (advice: StandbyAdvice) => { setSelectedId(advice.id); mapRef.current?.setView([advice.standby.lat, advice.standby.lng], 13, { animate: true }); };
@@ -322,7 +356,7 @@ export function RadarDashboard() {
   return <main className="app-shell">
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><span /></span><div><strong>STANDBY RADAR</strong><small>Realtime verkeersdruk + historische risicocontext</small></div></div>
-      <div className="topbar-right"><span className="scope">VAN EIJCK WERKGEBIED</span><span className="update">{data ? `live ${clock(data.generatedAt)} · ${next}s` : "verbinden…"}</span><button disabled={refreshing} onClick={() => void load(true)}>{refreshing ? "VERVERSEN…" : "NU VERVERSEN"}</button></div>
+      <div className="topbar-right"><span className="scope">VAN EIJCK WERKGEBIED</span><span className="update">{data ? `live ${clock(data.generatedAt)} · ${nextRefreshAt ? `${next}s` : autoUpdating ? "bijwerken…" : "wachten…"}` : "verbinden…"}</span><button disabled={refreshing || autoUpdating} onClick={() => void load(true)}>{refreshing ? "VERVERSEN…" : autoUpdating ? "BIJWERKEN…" : "NU VERVERSEN"}</button></div>
     </header>
 
     <section className="workspace">
