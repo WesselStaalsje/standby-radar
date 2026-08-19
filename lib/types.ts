@@ -11,6 +11,7 @@ export type TrafficEvent = {
   queueLengthMeters: number | null;
   source: string | null;
   updatedAt: string | null;
+  rayon?: string | null;
 };
 
 export type WeatherSnapshot = {
@@ -34,6 +35,7 @@ export type StandbyLocation = {
 
 export type StandbyAdvice = {
   id: string;
+  rayon: string;
   road: string;
   segmentName: string;
   kmFrom: number;
@@ -55,6 +57,16 @@ export type StandbyAdvice = {
   reasons: string[];
   weather: WeatherSnapshot | null;
   standby: StandbyLocation;
+};
+
+export type RayonRoadOverlay = {
+  id: string;
+  rayon: string;
+  road: string;
+  direction: "Li" | "Re" | null;
+  fromKm: number;
+  toKm: number;
+  coordinates: Array<[number, number]>;
 };
 
 export type SourceStatus = {
@@ -80,6 +92,10 @@ export type LiveRadarData = {
   events: TrafficEvent[];
   advice: StandbyAdvice[];
   sources: SourceStatus[];
+  rayons: {
+    codes: string[];
+    roadOverlays: RayonRoadOverlay[];
+  };
   matrix: {
     activeSignals: number;
     byRoad: MatrixRoadSummary[];
@@ -93,6 +109,7 @@ export type LiveRadarData = {
     segmentCount: number;
     measuredSiteCount: number;
     candidateLocationCount: number;
+    rayonCount: number;
     rushHour: boolean;
     modelVersion: string;
     note: string;
