@@ -1,7 +1,7 @@
 import { createGunzip, gunzipSync } from "node:zlib";
 import { Readable } from "node:stream";
 import type { ImnRoadRange } from "@/lib/rayons";
-import { findImnRange, normalizeDirection } from "@/lib/rayons";
+import { normalizeDirection } from "@/lib/rayons";
 import { loadImnSiteSnapshot } from "@/lib/imn-site-snapshot";
 import type { MeasurementSite, RoadMetringPoint, SiteTraffic, MatrixSignal } from "@/lib/ndw";
 import { parseMatrix, parseRoadMetringPoints, parseTrafficSamples } from "@/lib/ndw";
@@ -163,7 +163,8 @@ async function fetchNwbGraph() {
   const edges = [] as ReturnType<typeof parseNwbRoadEdges>;
   let offset = 0;
   let updatedAt: string | null = null;
-  for (let page = 0; page < 12; page += 1) {
+  const pageSize = 1000;
+  for (let page = 0; page < 40; page += 1) {
     const params = new URLSearchParams({
       where: "wegbehsrt='R'",
       outFields: "wvk_id,jte_id_beg,jte_id_end,wegnummer,rpe_code,admrichtng,rijrichtng,wegbehsrt",
@@ -174,7 +175,7 @@ async function fetchNwbGraph() {
       spatialRel: "esriSpatialRelIntersects",
       outSR: "4326",
       resultOffset: String(offset),
-      resultRecordCount: "5000",
+      resultRecordCount: String(pageSize),
       f: "geojson",
     });
     const response = await fetch(`${NWB_WEGVAKKEN_URL}?${params}`, {
@@ -187,7 +188,7 @@ async function fetchNwbGraph() {
     const json = await response.json() as { features?: unknown[] };
     edges.push(...parseNwbRoadEdges(json));
     const count = json.features?.length ?? 0;
-    if (count < 5000) break;
+    if (count < pageSize) break;
     offset += count;
   }
   const unique = new Map(edges.map(edge => [edge.wvkId, edge]));
