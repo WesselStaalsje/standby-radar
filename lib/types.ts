@@ -37,17 +37,20 @@ export type StandbyAdvice = {
   segmentName: string;
   kmFrom: number;
   kmTo: number;
-  centerLat: number;
-  centerLng: number;
   score: number;
   pressure: "hoog" | "verhoogd" | "rustig";
   confidence: "hoog" | "middel" | "laag";
   recommendedUnits: number;
+  sensorCount: number;
+  averageSpeedKph: number | null;
+  flowVehiclesPerHour: number | null;
+  congestionIndex: number;
   localEvents: number;
   accidents: number;
   obstructions: number;
   matrixClusters: number;
   lowSpeedMatrixClusters: number;
+  corroboratingSignals: number;
   reasons: string[];
   weather: WeatherSnapshot | null;
   standby: StandbyLocation;
@@ -59,6 +62,7 @@ export type SourceStatus = {
   ok: boolean;
   updatedAt: string | null;
   error: string | null;
+  lineage?: string | null;
 };
 
 export type MatrixRoadSummary = {
@@ -86,6 +90,7 @@ export type LiveRadarData = {
     trafficCount: number;
     closureCount: number;
     segmentCount: number;
+    measuredSiteCount: number;
     rushHour: boolean;
     modelVersion: string;
     note: string;
