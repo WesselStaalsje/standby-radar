@@ -1,7 +1,8 @@
-import { gunzipSync } from "node:zlib";
+import { createGunzip, gunzipSync } from "node:zlib";
+import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import type { SourceStatus, StandbyAdvice, WeatherSnapshot } from "@/lib/types";
-import type { MeasurementSite, RoadMetringPoint } from "@/lib/ndw";
+import type { MeasurementSite, RawMeasurementSite, RoadMetringPoint, SiteTraffic } from "@/lib/ndw";
 import {
   mapMeasurementSites,
   matrixSummary,
@@ -73,6 +74,69 @@ const fetchText = async (url: string, revalidate: number) => {
     updatedAt: response.headers.get("last-modified") ?? response.headers.get("date"),
   };
 };
+
+async function streamGzipXmlRecords(
+  url: string,
+  recordName: string,
+  onRecord: (record: string) => void,
+) {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { "user-agent": "StandbyRadar/0.5" },
+  });
+  if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+  const input = Readable.fromWeb(response.body as never);
+  const stream = input.pipe(createGunzip());
+  const decoder = new TextDecoder();
+  const startRegex = new RegExp(`<(?:(?:[A-Za-z0-9_-]+):)?${recordName}\\b`, "i");
+  const endRegex = new RegExp(`</(?:(?:[A-Za-z0-9_-]+):)?${recordName}>`, "i");
+  let buffer = "";
+
+  for await (const chunk of stream) {
+    buffer += decoder.decode(chunk as Uint8Array, { stream: true });
+
+    while (true) {
+      const startMatch = startRegex.exec(buffer);
+      if (!startMatch) {
+        if (buffer.length > 4096) buffer = buffer.slice(-4096);
+        break;
+      }
+
+      const start = startMatch.index;
+      const remainder = buffer.slice(start);
+      const endMatch = endRegex.exec(remainder);
+      if (!endMatch) {
+        buffer = remainder;
+        break;
+      }
+
+      const end = start + endMatch.index + endMatch[0].length;
+      onRecord(buffer.slice(start, end));
+      buffer = buffer.slice(end);
+    }
+  }
+
+  return response.headers.get("last-modified") ?? response.headers.get("date");
+}
+
+async function fetchRawSitesStreaming() {
+  const raw: RawMeasurementSite[] = [];
+  const updatedAt = await streamGzipXmlRecords(URLS.sites, "measurementSiteRecord", record => {
+    const parsed = parseRawMeasurementSites(record);
+    if (parsed.length) raw.push(...parsed);
+  });
+  return { raw, updatedAt };
+}
+
+async function fetchTrafficStreaming(siteMap: Map<string, MeasurementSite>) {
+  const samples: SiteTraffic[] = [];
+  const updatedAt = await streamGzipXmlRecords(URLS.traffic, "siteMeasurements", record => {
+    const parsed = parseTrafficSamples(record, siteMap);
+    if (parsed.length) samples.push(...parsed);
+  });
+  return { samples, updatedAt };
+}
 
 async function fetchRoadPoints() {
   const all: RoadMetringPoint[] = [];
@@ -148,7 +212,7 @@ async function fetchOsmCandidates(points: RoadMetringPoint[]) {
 out center tags;`;
   const response = await fetch(URLS.overpass, {
     method: "POST",
-    next: { revalidate: 21600 },
+    cache: "no-store",
     headers: {
       "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
       "user-agent": "StandbyRadar/0.5",
@@ -167,11 +231,10 @@ async function getStaticContext(): Promise<StaticContext> {
   if (staticCache && staticCache.expires > Date.now()) return staticCache;
 
   const [siteFeed, metering] = await Promise.all([
-    fetchText(URLS.sites, 21600),
+    fetchRawSitesStreaming(),
     fetchRoadPoints(),
   ]);
-  const rawSites = parseRawMeasurementSites(siteFeed.text);
-  const sites = mapMeasurementSites(rawSites, metering.points);
+  const sites = mapMeasurementSites(siteFeed.raw, metering.points);
 
   let rwsAreas: CandidateLocation[] = [];
   let osmCandidates: CandidateLocation[] = [];
@@ -180,14 +243,21 @@ async function getStaticContext(): Promise<StaticContext> {
   let rwsAreasError: string | null = null;
   let osmError: string | null = null;
 
-  await Promise.all([
-    fetchRwsAreas(metering.points)
-      .then(result => { rwsAreas = result.locations; rwsAreasUpdatedAt = result.updatedAt; })
-      .catch(error => { rwsAreasError = error instanceof Error ? error.message : "Niet bereikbaar"; }),
-    fetchOsmCandidates(metering.points)
-      .then(result => { osmCandidates = result.locations; osmUpdatedAt = result.updatedAt; })
-      .catch(error => { osmError = error instanceof Error ? error.message : "Niet bereikbaar"; }),
-  ]);
+  try {
+    const result = await fetchRwsAreas(metering.points);
+    rwsAreas = result.locations;
+    rwsAreasUpdatedAt = result.updatedAt;
+  } catch (error) {
+    rwsAreasError = error instanceof Error ? error.message : "Niet bereikbaar";
+  }
+
+  try {
+    const result = await fetchOsmCandidates(metering.points);
+    osmCandidates = result.locations;
+    osmUpdatedAt = result.updatedAt;
+  } catch (error) {
+    osmError = error instanceof Error ? error.message : "Niet bereikbaar";
+  }
 
   const deduped = new Map<string, CandidateLocation>();
   for (const location of [...rwsAreas, ...osmCandidates]) {
@@ -261,10 +331,7 @@ export async function GET() {
   try { staticContext = await getStaticContext(); } catch { staticContext = null; }
 
   const sites = staticContext?.sites ?? [];
-  const candidates = [
-    ...(staticContext?.rwsAreas ?? []),
-    ...(staticContext?.osmCandidates ?? []),
-  ];
+  const candidates = [...(staticContext?.rwsAreas ?? []), ...(staticContext?.osmCandidates ?? [])];
 
   const sources: SourceStatus[] = [
     { id: "ndw-sites", name: "NDW fysieke meetlocaties", ok: sites.length > 0, updatedAt: staticContext?.siteUpdatedAt ?? null, error: sites.length ? null : "Geen A-wegmeetpunten gekoppeld", lineage: "NDW AVG meetlocaties" },
@@ -279,13 +346,13 @@ export async function GET() {
 
   let events = parseEvents("");
   let matrix = parseMatrix("");
-  let samples = parseTrafficSamples("", new Map());
+  let samples: SiteTraffic[] = [];
   const siteMap = new Map(sites.map(site => [site.id, site]));
 
   await Promise.all([
-    fetchText(URLS.traffic, 20)
+    fetchTrafficStreaming(siteMap)
       .then(result => {
-        samples = parseTrafficSamples(result.text, siteMap);
+        samples = result.samples;
         sources[2] = { ...sources[2], ok: samples.length > 0, updatedAt: result.updatedAt, error: samples.length ? null : "Geen verse detectorwaarden" };
       })
       .catch(error => { sources[2].error = error instanceof Error ? error.message : "Niet bereikbaar"; }),
@@ -336,7 +403,7 @@ export async function GET() {
       ? "hoog"
       : sensor.sensorCount >= 1 && corroboratingSignals >= 1 ? "middel" : "laag";
 
-    return { seg, sensor, msi, incident, localWeather, weatherPoints, corroboratingSignals, score, confidence };
+    return { seg, sensor, msi, incident, localWeather, corroboratingSignals, score, confidence };
   }).sort((a, b) => b.score - a.score || b.corroboratingSignals - a.corroboratingSignals);
 
   const advice: StandbyAdvice[] = [];
@@ -349,9 +416,7 @@ export async function GET() {
 
     const pressure: StandbyAdvice["pressure"] = item.score >= 65 ? "hoog" : item.score >= 38 ? "verhoogd" : "rustig";
     const maxSnap = item.seg.sites.length ? Math.max(...item.seg.sites.map(site => site.mappingDistanceMeters)) : 0;
-    const locationType = match.location.source === "rws"
-      ? "officiële RWS-verzorgingsplaats"
-      : `${match.location.kind}-locatie uit OpenStreetMap`;
+    const locationType = match.location.source === "rws" ? "officiële RWS-verzorgingsplaats" : `${match.location.kind}-locatie uit OpenStreetMap`;
 
     const reasons = [
       `${item.seg.road} km ${item.seg.kmFrom}–${item.seg.kmTo}: vast segment van exact 5 km`,
@@ -367,36 +432,18 @@ export async function GET() {
     ].filter((x): x is string => Boolean(x));
 
     advice.push({
-      id: segmentId(item.seg),
-      road: item.seg.road,
-      segmentName: `${item.seg.road} km ${item.seg.kmFrom}–${item.seg.kmTo}`,
-      kmFrom: item.seg.kmFrom,
-      kmTo: item.seg.kmTo,
-      score: item.score,
-      pressure,
-      confidence: item.confidence,
+      id: segmentId(item.seg), road: item.seg.road, segmentName: `${item.seg.road} km ${item.seg.kmFrom}–${item.seg.kmTo}`,
+      kmFrom: item.seg.kmFrom, kmTo: item.seg.kmTo, score: item.score, pressure, confidence: item.confidence,
       recommendedUnits: item.score >= 72 && item.confidence !== "laag" ? 2 : item.score >= 38 ? 1 : 0,
-      sensorCount: item.sensor.sensorCount,
-      averageSpeedKph: item.sensor.averageSpeedKph,
-      flowVehiclesPerHour: item.sensor.flowVehiclesPerHour,
-      congestionIndex: item.sensor.congestionIndex,
-      localEvents: item.incident.items.length,
-      accidents: item.incident.accidents,
-      obstructions: item.incident.obstructions,
-      matrixClusters: item.msi.clusters,
-      lowSpeedMatrixClusters: item.msi.lowSpeed,
-      corroboratingSignals: item.corroboratingSignals,
-      reasons,
-      weather: item.localWeather,
+      sensorCount: item.sensor.sensorCount, averageSpeedKph: item.sensor.averageSpeedKph,
+      flowVehiclesPerHour: item.sensor.flowVehiclesPerHour, congestionIndex: item.sensor.congestionIndex,
+      localEvents: item.incident.items.length, accidents: item.incident.accidents, obstructions: item.incident.obstructions,
+      matrixClusters: item.msi.clusters, lowSpeedMatrixClusters: item.msi.lowSpeed,
+      corroboratingSignals: item.corroboratingSignals, reasons, weather: item.localWeather,
       standby: {
-        id: match.location.id,
-        name: match.location.name,
-        address: match.location.address,
-        lat: match.location.lat,
-        lng: match.location.lng,
-        kind: match.location.kind,
-        source: match.location.source,
-        verified: match.location.verified,
+        id: match.location.id, name: match.location.name, address: match.location.address,
+        lat: match.location.lat, lng: match.location.lng, kind: match.location.kind,
+        source: match.location.source, verified: match.location.verified,
       },
     });
 
@@ -407,12 +454,7 @@ export async function GET() {
   const activeSignals = byRoad.reduce((sum, row) => sum + row.active, 0);
 
   return NextResponse.json({
-    generatedAt,
-    refreshAfterSeconds: 30,
-    region: "Noord-Brabant + Gelderland",
-    events,
-    advice,
-    sources,
+    generatedAt, refreshAfterSeconds: 30, region: "Noord-Brabant + Gelderland", events, advice, sources,
     matrix: { activeSignals, byRoad },
     meta: {
       eventCount: events.length,
@@ -425,7 +467,7 @@ export async function GET() {
       candidateLocationCount: candidates.length,
       rushHour: rushHour(),
       modelVersion: "0.5-dynamic-standby-fusion",
-      note: `Alle ${segments.length} segmenten worden eerst live gescoord. Daarna kiest de engine vanuit ${candidates.length} actuele locatiekandidaten automatisch de beste stand-byplek bij de zwaarste segmenten. Er zijn geen handmatig vastgezette voorbeeldlocaties meer.`,
+      note: `Alle ${segments.length} segmenten worden eerst live gescoord. Daarna kiest de engine vanuit ${candidates.length} locatiekandidaten automatisch de beste stand-byplek bij de zwaarste segmenten. Er zijn geen handmatig vastgezette voorbeeldlocaties meer.`,
     },
   }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
