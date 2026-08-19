@@ -16,6 +16,7 @@ const tone = (score: number) => score >= 65 ? "hot" : score >= 38 ? "warm" : "no
 const allow = (kind: TrafficKind, f: Filters) => kind === "traffic" ? f.traffic : kind === "works" ? f.works : f.incidents;
 const speedLabel = (value: number | null) => value === null ? "—" : `${Math.round(value)} km/u`;
 const flowLabel = (value: number | null) => value === null ? "—" : `${value.toLocaleString("nl-NL")} vtg/u`;
+const locationSource = (a: StandbyAdvice) => a.standby.source === "rws" ? "officiële RWS-locatie" : "OSM-kandidaat";
 
 export function RadarDashboard() {
   const mapEl = useRef<HTMLDivElement>(null);
@@ -75,7 +76,7 @@ export function RadarDashboard() {
       for (const a of best.values()) {
         const icon = L.divIcon({ className: "standby-div-icon", html: `<span class="standby-pin standby-pin--${tone(a.score)}">${a.score}</span>`, iconSize: [38, 38], iconAnchor: [19, 19] });
         const m = L.marker([a.standby.lat, a.standby.lng], { icon, zIndexOffset: 300 });
-        m.bindPopup(`<div class="radar-popup"><strong>${esc(a.standby.name)}</strong><br>${esc(a.standby.address)}<hr><strong>${esc(a.segmentName)}</strong><br>${speedLabel(a.averageSpeedKph)} · ${flowLabel(a.flowVehiclesPerHour)}<br>Score ${a.score}/100 · zekerheid ${esc(a.confidence)}</div>`);
+        m.bindPopup(`<div class="radar-popup"><strong>${esc(a.standby.name)}</strong><br>${esc(a.standby.address)}<br>${esc(locationSource(a))}<hr><strong>${esc(a.segmentName)}</strong><br>${speedLabel(a.averageSpeedKph)} · ${flowLabel(a.flowVehiclesPerHour)}<br>Score ${a.score}/100 · zekerheid ${esc(a.confidence)}</div>`);
         m.on("click", () => setSelectedId(a.id)); m.addTo(layer);
       }
     }
@@ -101,26 +102,26 @@ export function RadarDashboard() {
         <div ref={mapEl} className="map" aria-label="Standby Radar kaart" />
         {loading && <div className="loading-card">LIVE BRONNEN LADEN…</div>}
         <div className="map-hud"><div className="stats">
-          <Stat label="5-km segmenten" value={data?.meta.segmentCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Ongevallen" value={data?.meta.accidentCount} /><Stat label="Matrixacties" value={data?.matrix.activeSignals} />
+          <Stat label="5-km segmenten" value={data?.meta.segmentCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} /><Stat label="Matrixacties" value={data?.matrix.activeSignals} />
         </div><div className="filters">
           <Filter label="Verkeer" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
           <Filter label="Incidenten" active={filters.incidents} onClick={() => setFilters(f => ({ ...f, incidents: !f.incidents }))} />
           <Filter label="Werkzaamheden" active={filters.works} onClick={() => setFilters(f => ({ ...f, works: !f.works }))} />
           <Filter label="Stand-by" active={filters.advice} onClick={() => setFilters(f => ({ ...f, advice: !f.advice }))} />
         </div></div>
-        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Stand-byplek</span></div>
+        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Automatisch gekozen stand-byplek</span></div>
       </div>
       <aside className="sidebar"><div className="side-scroll">
         {error && <div className="error-card">{error}</div>}
-        <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 6} online</span></div><div className="sources">{data?.sources.map(s => <span key={s.id} className={s.ok ? "source source--ok" : "source"} title={`${s.lineage ?? ""}${s.updatedAt ? ` · ${clock(s.updatedAt)}` : ""}${s.error ? ` · ${s.error}` : ""}`}>{s.name}</span>)}</div></section>
-        <section className="block"><div className="block-title"><strong>DRUKSTE WEGSEGMENTEN</strong><span>exact 5 km</span></div><div className="advice-list">
+        <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 8} online</span></div><div className="sources">{data?.sources.map(s => <span key={s.id} className={s.ok ? "source source--ok" : "source"} title={`${s.lineage ?? ""}${s.updatedAt ? ` · ${clock(s.updatedAt)}` : ""}${s.error ? ` · ${s.error}` : ""}`}>{s.name}</span>)}</div></section>
+        <section className="block"><div className="block-title"><strong>LIVE STAND-BYADVIES</strong><span>drukte bepaalt locatie</span></div><div className="advice-list">
           {data?.advice.slice(0, 12).map((a, i) => <button key={a.id} className={`advice-card ${selected?.id === a.id ? "advice-card--selected" : ""}`} onClick={() => focus(a)}>
-            <span className={`score score--${tone(a.score)}`}>{a.score}</span><span className="advice-copy"><strong>{i + 1}. {a.segmentName}<em>{a.recommendedUnits}×</em></strong><small>{a.standby.name} · {a.standby.knownOperationalLocation ? "operationeel bekend" : "RWS-kandidaat"}</small><span>{speedLabel(a.averageSpeedKph)} · {flowLabel(a.flowVehiclesPerHour)} · {a.sensorCount} meetpunt(en)</span><small>{a.standby.address}</small></span>
+            <span className={`score score--${tone(a.score)}`}>{a.score}</span><span className="advice-copy"><strong>{i + 1}. {a.segmentName}<em>{a.recommendedUnits}×</em></strong><small>→ {a.standby.name} · {locationSource(a)}</small><span>{speedLabel(a.averageSpeedKph)} · {flowLabel(a.flowVehiclesPerHour)} · {a.sensorCount} meetpunt(en)</span><small>{a.standby.address}</small></span>
           </button>)}
         </div></section>
-        {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DIT ADVIES?</small><strong>{selected.segmentName}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
+        {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{selected.segmentName}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
           <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Incidenten lokaal" value={selected.localEvents} /></div>
-          <ul>{selected.reasons.map(r => <li key={r}>{r}</li>)}</ul><p>{selected.standby.knownOperationalLocation ? "Deze stand-byplek is als operationeel bekende locatie opgenomen." : "RWS-verzorgingsplaats: locatie is officieel, operationele geschiktheid moet nog worden bevestigd."}</p>
+          <ul>{selected.reasons.map(r => <li key={r}>{r}</li>)}</ul><p>{selected.standby.source === "rws" ? "Dit is een officiële RWS-locatie. De engine koos hem automatisch vanwege de actuele druk in het bijbehorende segment." : "Dit is een automatisch gevonden OSM-kandidaat nabij dezelfde A-weg. De plek moet operationeel geschikt en legaal toegankelijk blijven; bij twijfel heeft een officiële RWS-locatie voorrang."}</p>
         </section>}
         <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>{data?.meta.note ?? "Live analyse wordt geladen."}</p></div>
       </div></aside>
