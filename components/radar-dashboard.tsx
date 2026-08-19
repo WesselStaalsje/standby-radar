@@ -8,6 +8,20 @@ type Filters = { traffic: boolean; incidents: boolean; works: boolean; advice: b
 type HistoricalSegment = { id: string; road: string; kmFrom: number; kmTo: number; accidents: number; weightedRisk: number; historyScore: number; years: number[]; severe: number };
 type HistoryData = { generatedAt: string; source: string; totalRecords: number; mappedRecords?: number; segments: HistoricalSegment[]; note?: string; error?: string };
 type HistoryMatch = { accidents: number; score: number; severe: number; years: number[] };
+type StabilityState = {
+  loaded: boolean;
+  advice: StandbyAdvice[];
+  since: number;
+  pendingSignature: string | null;
+  pendingSince: number | null;
+};
+
+const STANDBY_STORAGE_KEY = "standby-radar:stable-assignments:v1";
+const MIN_HOLD_MS = 30 * 60 * 1000;
+const CHANGE_CONFIRM_MS = 5 * 60 * 1000;
+const CHANGE_MARGIN = 15;
+const EMERGENCY_SCORE = 80;
+const MAX_RESTORE_AGE_MS = 2 * 60 * 60 * 1000;
 
 const colors: Record<TrafficKind, string> = {
   traffic: "#f1a34b", accident: "#e44c4c", obstruction: "#df7a43",
@@ -15,13 +29,14 @@ const colors: Record<TrafficKind, string> = {
 };
 
 const esc = (s: string) => s.replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c] ?? c));
-const clock = (s?: string | null) => { if (!s) return "—"; const d = new Date(s); return Number.isNaN(d.getTime()) ? s : d.toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
+const clock = (s?: string | number | null) => { if (s === null || s === undefined) return "—"; const d = new Date(s); return Number.isNaN(d.getTime()) ? String(s) : d.toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: typeof s === "number" ? undefined : "2-digit" }); };
 const tone = (score: number) => score >= 65 ? "hot" : score >= 38 ? "warm" : "normal";
 const allow = (kind: TrafficKind, f: Filters) => kind === "traffic" ? f.traffic : kind === "works" ? f.works : f.incidents;
 const speedLabel = (value: number | null) => value === null ? "—" : `${Math.round(value)} km/u`;
 const flowLabel = (value: number | null) => value === null ? "—" : `${value.toLocaleString("nl-NL")} vtg/u`;
 const locationSource = (a: StandbyAdvice) => a.standby.source === "rws" ? "officiële RWS-locatie" : "OSM-kandidaat";
 const segmentLabel = (a: StandbyAdvice) => `${a.road} km ${a.kmFrom}–${a.kmTo}`;
+const minutesLabel = (ms: number) => `${Math.max(1, Math.ceil(ms / 60_000))} min`;
 
 function historyFor(advice: StandbyAdvice, history: HistoryData | null): HistoryMatch {
   if (!history) return { accidents: 0, score: 0, severe: 0, years: [] };
@@ -36,6 +51,27 @@ function historyFor(advice: StandbyAdvice, history: HistoryData | null): History
   };
 }
 
+function operationalCandidates(advice: StandbyAdvice[]) {
+  const byLocation = new Map<string, StandbyAdvice>();
+  for (const item of advice) {
+    if (item.recommendedUnits <= 0) continue;
+    const previous = byLocation.get(item.standby.id);
+    if (!previous || item.score > previous.score) byLocation.set(item.standby.id, item);
+  }
+  return [...byLocation.values()].sort((a, b) => b.score - a.score);
+}
+
+function standbySignature(advice: StandbyAdvice[]) {
+  return advice
+    .map(item => `${item.standby.id}:${item.recommendedUnits}`)
+    .sort()
+    .join("|");
+}
+
+function setQuality(advice: StandbyAdvice[]) {
+  return advice.reduce((sum, item) => sum + item.score * Math.max(1, item.recommendedUnits), 0);
+}
+
 export function RadarDashboard() {
   const mapEl = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LeafletMap | null>(null);
@@ -43,6 +79,7 @@ export function RadarDashboard() {
   const layerRef = useRef<LayerGroup | null>(null);
   const requestSeq = useRef(0);
   const lastGoodAdvice = useRef<StandbyAdvice[]>([]);
+  const stabilityRef = useRef<StabilityState>({ loaded: false, advice: [], since: 0, pendingSignature: null, pendingSince: null });
 
   const [mapReady, setMapReady] = useState(false);
   const [data, setData] = useState<LiveRadarData | null>(null);
@@ -53,6 +90,9 @@ export function RadarDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [filters, setFilters] = useState<Filters>({ traffic: true, incidents: true, works: false, advice: true });
+  const [stableStandby, setStableStandby] = useState<StandbyAdvice[]>([]);
+  const [stableSince, setStableSince] = useState<number | null>(null);
+  const [pendingSince, setPendingSince] = useState<number | null>(null);
 
   const fetchPayload = useCallback(async () => {
     const r = await fetch(`/api/live?_=${Date.now()}`, { cache: "no-store" });
@@ -108,6 +148,124 @@ export function RadarDashboard() {
   }, []);
 
   useEffect(() => {
+    if (!data) return;
+    const currentTime = Date.now();
+    const raw = operationalCandidates(data.advice);
+    const state = stabilityRef.current;
+
+    if (!state.loaded) {
+      state.loaded = true;
+      try {
+        const saved = localStorage.getItem(STANDBY_STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as Partial<StabilityState>;
+          if (Array.isArray(parsed.advice) && typeof parsed.since === "number" && currentTime - parsed.since <= MAX_RESTORE_AGE_MS) {
+            state.advice = parsed.advice;
+            state.since = parsed.since;
+            state.pendingSignature = typeof parsed.pendingSignature === "string" ? parsed.pendingSignature : null;
+            state.pendingSince = typeof parsed.pendingSince === "number" ? parsed.pendingSince : null;
+          }
+        }
+      } catch {}
+    }
+
+    const persist = () => {
+      try {
+        localStorage.setItem(STANDBY_STORAGE_KEY, JSON.stringify({
+          advice: state.advice,
+          since: state.since,
+          pendingSignature: state.pendingSignature,
+          pendingSince: state.pendingSince,
+        }));
+      } catch {}
+    };
+
+    const publish = () => {
+      setStableStandby([...state.advice]);
+      setStableSince(state.since || null);
+      setPendingSince(state.pendingSince);
+      persist();
+    };
+
+    const commit = (nextAdvice: StandbyAdvice[], reasonTime = currentTime) => {
+      state.advice = nextAdvice;
+      state.since = reasonTime;
+      state.pendingSignature = null;
+      state.pendingSince = null;
+      publish();
+    };
+
+    if (!state.advice.length) {
+      if (raw.length) commit(raw);
+      else publish();
+      return;
+    }
+
+    const freshByLocation = new Map(data.advice.map(item => [item.standby.id, item]));
+    state.advice = state.advice.map(assigned => {
+      const live = freshByLocation.get(assigned.standby.id);
+      return live ? { ...live, recommendedUnits: assigned.recommendedUnits } : assigned;
+    });
+
+    const stableSignature = standbySignature(state.advice);
+    const rawSignature = standbySignature(raw);
+
+    if (rawSignature === stableSignature) {
+      state.advice = raw;
+      state.pendingSignature = null;
+      state.pendingSince = null;
+      publish();
+      return;
+    }
+
+    const emergency = raw.some(item =>
+      item.score >= EMERGENCY_SCORE &&
+      item.corroboratingSignals >= 2 &&
+      (item.accidents > 0 || item.obstructions > 0 || item.matrixClusters >= 3),
+    );
+    if (emergency) {
+      commit(raw);
+      return;
+    }
+
+    const holdAge = currentTime - state.since;
+    if (holdAge < MIN_HOLD_MS) {
+      state.pendingSignature = rawSignature || "none";
+      state.pendingSince = state.pendingSignature === (stabilityRef.current.pendingSignature ?? null) && state.pendingSince
+        ? state.pendingSince
+        : currentTime;
+      publish();
+      return;
+    }
+
+    const currentStillUseful = state.advice.some(item => item.score >= 38);
+    const improvement = setQuality(raw) - setQuality(state.advice);
+    const materiallyBetter = !currentStillUseful || improvement >= CHANGE_MARGIN;
+
+    if (!materiallyBetter) {
+      state.pendingSignature = null;
+      state.pendingSince = null;
+      publish();
+      return;
+    }
+
+    const targetSignature = rawSignature || "none";
+    if (state.pendingSignature !== targetSignature || !state.pendingSince) {
+      state.pendingSignature = targetSignature;
+      state.pendingSince = currentTime;
+      publish();
+      return;
+    }
+
+    if (currentTime - state.pendingSince >= CHANGE_CONFIRM_MS) {
+      commit(raw);
+      return;
+    }
+
+    publish();
+  }, [data]);
+
+  useEffect(() => {
     let dead = false;
     void (async () => {
       if (!mapEl.current || mapRef.current) return;
@@ -133,15 +291,11 @@ export function RadarDashboard() {
     layer.clearLayers();
 
     if (filters.advice) {
-      const best = new Map<string, StandbyAdvice>();
-      for (const advice of data.advice) {
-        if (!best.get(advice.standby.id) || (best.get(advice.standby.id)?.score ?? -1) < advice.score) best.set(advice.standby.id, advice);
-      }
-      for (const advice of best.values()) {
+      for (const advice of stableStandby) {
         const hist = historyFor(advice, history);
         const icon = L.divIcon({ className: "standby-div-icon", html: `<span class="standby-pin standby-pin--${tone(advice.score)}">${advice.score}</span>`, iconSize: [38, 38], iconAnchor: [19, 19] });
         const marker = L.marker([advice.standby.lat, advice.standby.lng], { icon, zIndexOffset: 300 });
-        marker.bindPopup(`<div class="radar-popup"><strong>${esc(advice.standby.name)}</strong><br>${esc(advice.standby.address)}<br>${esc(locationSource(advice))}<hr><strong>${esc(segmentLabel(advice))}</strong><br>${speedLabel(advice.averageSpeedKph)} · ${flowLabel(advice.flowVehiclesPerHour)}<br>Live score ${advice.score}/100 · zekerheid ${esc(advice.confidence)}${hist.accidents ? `<br>Historie: ${hist.accidents} BRON-ongeval(len) · ${hist.score}/15` : ""}</div>`);
+        marker.bindPopup(`<div class="radar-popup"><strong>${esc(advice.standby.name)}</strong><br>${esc(advice.standby.address)}<br>${esc(locationSource(advice))}<hr><strong>${esc(segmentLabel(advice))}</strong><br>${speedLabel(advice.averageSpeedKph)} · ${flowLabel(advice.flowVehiclesPerHour)}<br>Actuele score ${advice.score}/100 · zekerheid ${esc(advice.confidence)}<br><strong>Operationele positie is gestabiliseerd</strong>${hist.accidents ? `<br>Historie: ${hist.accidents} BRON-ongeval(len) · ${hist.score}/15` : ""}</div>`);
         marker.on("click", () => setSelectedId(advice.id));
         marker.addTo(layer);
       }
@@ -153,22 +307,16 @@ export function RadarDashboard() {
       marker.bindPopup(`<div class="radar-popup"><strong>${esc(event.title)}</strong><br>${esc(event.roadRef ?? "IM-weg")}<br>Bron ${esc(event.source ?? "NDW")} · ${esc(clock(event.updatedAt))}</div>`);
       marker.addTo(layer);
     }
-  }, [mapReady, data, history, filters]);
+  }, [mapReady, data, history, filters, stableStandby]);
 
   const selected = useMemo(() => data?.advice.find(a => a.id === selectedId) ?? data?.advice[0] ?? null, [data, selectedId]);
   const selectedHistory = useMemo(() => selected ? historyFor(selected, history) : null, [selected, history]);
-  const activeStandby = useMemo(() => {
-    const byLocation = new Map<string, StandbyAdvice>();
-    for (const advice of data?.advice ?? []) {
-      if (advice.recommendedUnits <= 0) continue;
-      const previous = byLocation.get(advice.standby.id);
-      if (!previous || advice.score > previous.score) byLocation.set(advice.standby.id, advice);
-    }
-    return [...byLocation.values()].sort((a, b) => b.score - a.score);
-  }, [data]);
+  const activeStandby = stableStandby;
   const activeUnitCount = activeStandby.reduce((sum, advice) => sum + advice.recommendedUnits, 0);
   const age = data ? Math.max(0, Math.floor((now - new Date(data.generatedAt).getTime()) / 1000)) : 0;
   const next = Math.max(0, (data?.refreshAfterSeconds ?? 30) - age);
+  const holdRemaining = stableSince ? Math.max(0, MIN_HOLD_MS - (now - stableSince)) : 0;
+  const pendingRemaining = pendingSince ? Math.max(0, CHANGE_CONFIRM_MS - (now - pendingSince)) : 0;
   const focus = (advice: StandbyAdvice) => { setSelectedId(advice.id); mapRef.current?.setView([advice.standby.lat, advice.standby.lng], 13, { animate: true }); };
 
   return <main className="app-shell">
@@ -192,20 +340,22 @@ export function RadarDashboard() {
 
         <section className="standby-now-panel" aria-label="Actuele stand-byadviezen">
           <div className="standby-now-heading">
-            <div><small>OPERATIONEEL ADVIES</small><strong>NU STANDBY</strong></div>
+            <div><small>GESTABILISEERD OPERATIONEEL ADVIES</small><strong>NU STANDBY</strong></div>
             <span className={activeUnitCount > 0 ? "standby-now-count standby-now-count--active" : "standby-now-count"}>{activeUnitCount} voertuig{activeUnitCount === 1 ? "" : "en"}</span>
           </div>
           <div className="standby-now-list">
             {activeStandby.map((advice, index) => <button key={advice.standby.id} className="standby-now-item" onClick={() => focus(advice)}>
               <b>{advice.recommendedUnits}×</b>
-              <span><strong>{index + 1}. {advice.standby.name}</strong><small>{advice.standby.address}</small><em>{segmentLabel(advice)} · score {advice.score}/100 · {advice.confidence}</em></span>
+              <span><strong>{index + 1}. {advice.standby.name}</strong><small>{advice.standby.address}</small><em>{segmentLabel(advice)} · actuele score {advice.score}/100 · {advice.confidence}</em></span>
             </button>)}
             {!loading && activeStandby.length === 0 && <div className="standby-now-empty"><strong>Geen actieve stand-by nodig</strong><span>Geen wegdeel staat nu boven de operationele drempel.</span></div>}
           </div>
-          <footer>Live herberekend iedere 30 sec. · laatste analyse {data ? clock(data.generatedAt) : "—"}</footer>
+          <footer>
+            {activeStandby.length > 0 && stableSince ? <>Vast sinds {clock(stableSince)} · {holdRemaining > 0 ? `minimaal nog ${minutesLabel(holdRemaining)} op positie` : pendingSince ? `alternatief wordt bevestigd · nog ${minutesLabel(pendingRemaining)}` : `alleen wisselen bij ≥${CHANGE_MARGIN} punten voordeel gedurende 5 min`}</> : "Live analyse iedere 30 sec."}
+          </footer>
         </section>
 
-        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Automatisch gekozen stand-byplek</span></div>
+        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Gestabiliseerde stand-byplek</span></div>
       </div>
 
       <aside className="sidebar"><div className="side-scroll">
@@ -213,20 +363,20 @@ export function RadarDashboard() {
 
         <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 9} online</span></div><div className="sources">{data?.sources.map(source => <span key={source.id} className={source.ok ? "source source--ok" : "source"} title={`${source.lineage ?? ""}${source.updatedAt ? ` · ${clock(source.updatedAt)}` : ""}${source.error ? ` · ${source.error}` : ""}`}>{source.name}</span>)}{history && <span className={history.error ? "source" : "source source--ok"} title={history.note}>{history.error ? "BRON historie fout" : "RWS BRON historie"}</span>}</div></section>
 
-        <section className="block"><div className="block-title"><strong>LIVE STAND-BYADVIES</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
+        <section className="block"><div className="block-title"><strong>LIVE WEGVAKANALYSE</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
           {data?.advice.slice(0, 12).map((advice, index) => { const hist = historyFor(advice, history); return <button key={advice.id} className={`advice-card ${selected?.id === advice.id ? "advice-card--selected" : ""}`} onClick={() => focus(advice)}>
-            <span className={`score score--${tone(advice.score)}`}>{advice.score}</span><span className="advice-copy"><strong>{index + 1}. {segmentLabel(advice)}<em>{advice.recommendedUnits}×</em></strong><small>→ {advice.standby.name} · {locationSource(advice)}</small><span>{speedLabel(advice.averageSpeedKph)} · {flowLabel(advice.flowVehiclesPerHour)} · {advice.sensorCount} meetpunt(en)</span>{hist.accidents > 0 && <small>Historie 2022–2024: {hist.accidents} ongeval(len) · risico {hist.score}/15</small>}<small>{advice.standby.address}</small></span>
+            <span className={`score score--${tone(advice.score)}`}>{advice.score}</span><span className="advice-copy"><strong>{index + 1}. {segmentLabel(advice)}<em>{advice.recommendedUnits}×</em></strong><small>Live kandidaat → {advice.standby.name} · {locationSource(advice)}</small><span>{speedLabel(advice.averageSpeedKph)} · {flowLabel(advice.flowVehiclesPerHour)} · {advice.sensorCount} meetpunt(en)</span>{hist.accidents > 0 && <small>Historie 2022–2024: {hist.accidents} ongeval(len) · risico {hist.score}/15</small>}<small>{advice.standby.address}</small></span>
           </button>; })}
-          {!loading && data && data.advice.length === 0 && <div className="error-card">Geen stand-byadviezen ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
+          {!loading && data && data.advice.length === 0 && <div className="error-card">Geen live wegvakanalyse ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
         </div></section>
 
         {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{segmentLabel(selected)}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
           <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Historisch risico" value={`${selectedHistory?.score ?? 0}/15`} /></div>
           <ul>{selected.reasons.filter(reason => !reason.includes("IM-rayon")).map(reason => <li key={reason}>{reason}</li>)}{selectedHistory && selectedHistory.accidents > 0 && <li>Historie: {selectedHistory.accidents} geregistreerde BRON-ongevallen in overlappende 5-km-vakken ({selectedHistory.years.join(", ")}){selectedHistory.severe ? `, waarvan ${selectedHistory.severe} met zwaardere afloop` : ""}.</li>}</ul>
-          <p>De historische factor wordt nu als context getoond en nog niet blind bij de live score opgeteld. Voor echte pech-/stilvalhistorie is eigen bergingsdata of een historische IM-incidentdataset nauwkeuriger dan alleen ongevallen.</p>
+          <p>De live wegvakanalyse ververst iedere 30 seconden. De operationele stand-bypositie links onder gebruikt daarnaast een stabiliteitsregel: minimaal 30 minuten blijven, daarna alleen wisselen als een alternatief minimaal 15 punten beter is en dit 5 minuten aanhoudt. Alleen bij een uitzonderlijk zwaar live signaal kan direct worden gewisseld.</p>
         </section>}
 
-        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>Geen rayonlijnen of rayoncodes op de kaart. De backend beperkt de analyse nog steeds tot het gecontracteerde werkgebied.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
+        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>De backend beperkt de analyse tot het gecontracteerde werkgebied. Stand-byposities worden bewust gestabiliseerd om onnodige verplaatsingen en lege kilometers te voorkomen.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
       </div></aside>
     </section>
   </main>;
