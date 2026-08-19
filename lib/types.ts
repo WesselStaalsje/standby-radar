@@ -110,6 +110,8 @@ export type LiveRadarData = {
     measuredSiteCount: number;
     candidateLocationCount: number;
     rayonCount: number;
+    roadCount: number;
+    roads: string[];
     rushHour: boolean;
     modelVersion: string;
     note: string;
