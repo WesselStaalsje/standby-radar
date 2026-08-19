@@ -24,6 +24,7 @@ export function RadarDashboard() {
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const layerRef = useRef<LayerGroup | null>(null);
   const requestSeq = useRef(0);
+  const lastGoodAdvice = useRef<StandbyAdvice[]>([]);
   const [mapReady, setMapReady] = useState(false);
   const [data, setData] = useState<LiveRadarData | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -54,20 +55,15 @@ export function RadarDashboard() {
 
       if (seq !== requestSeq.current) return;
 
-      setData(current => {
-        if (payload.advice.length === 0 && current?.advice.length) {
-          return { ...payload, advice: current.advice };
-        }
-        return payload;
-      });
+      if (payload.advice.length) lastGoodAdvice.current = payload.advice;
+      const effectiveAdvice = payload.advice.length ? payload.advice : lastGoodAdvice.current;
+      const effectivePayload = effectiveAdvice === payload.advice ? payload : { ...payload, advice: effectiveAdvice };
 
-      setSelectedId(current => {
-        const effectiveAdvice = payload.advice.length ? payload.advice : data?.advice ?? [];
-        return current && effectiveAdvice.some(a => a.id === current) ? current : effectiveAdvice[0]?.id ?? null;
-      });
+      setData(effectivePayload);
+      setSelectedId(current => current && effectiveAdvice.some(a => a.id === current) ? current : effectiveAdvice[0]?.id ?? null);
 
-      if (payload.meta.segmentCount > 0 && payload.meta.candidateLocationCount > 0 && payload.advice.length === 0) {
-        setError("Live brondata is binnen, maar de stand-byselectie leverde tijdelijk geen locaties op. Vorige geldige adviezen blijven zichtbaar.");
+      if (shouldHaveAdvice && payload.advice.length === 0) {
+        setError("Live brondata is binnen, maar de stand-byselectie leverde tijdelijk geen locaties op. De laatste geldige adviezen blijven zichtbaar.");
       } else {
         setError(null);
       }
@@ -79,7 +75,7 @@ export function RadarDashboard() {
         setRefreshing(false);
       }
     }
-  }, [data?.advice, fetchPayload]);
+  }, [fetchPayload]);
 
   useEffect(() => {
     void load();
