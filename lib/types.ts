@@ -21,20 +21,36 @@ export type WeatherSnapshot = {
   observedAt: string | null;
 };
 
-export type StandbyAdvice = {
+export type StandbyLocation = {
   id: string;
   name: string;
-  province: string;
+  address: string;
   lat: number;
   lng: number;
-  roads: readonly string[];
+  kind: "restaurant" | "service_area" | "parking" | "other";
+  knownOperationalLocation: boolean;
+};
+
+export type StandbyAdvice = {
+  id: string;
+  road: string;
+  segmentName: string;
+  kmFrom: number;
+  kmTo: number;
+  centerLat: number;
+  centerLng: number;
   score: number;
+  pressure: "hoog" | "verhoogd" | "rustig";
   confidence: "hoog" | "middel" | "laag";
   recommendedUnits: number;
-  nearbyEvents: number;
+  localEvents: number;
+  accidents: number;
+  obstructions: number;
   matrixClusters: number;
+  lowSpeedMatrixClusters: number;
   reasons: string[];
   weather: WeatherSnapshot | null;
+  standby: StandbyLocation;
 };
 
 export type SourceStatus = {
@@ -69,6 +85,7 @@ export type LiveRadarData = {
     obstructionCount: number;
     trafficCount: number;
     closureCount: number;
+    segmentCount: number;
     rushHour: boolean;
     modelVersion: string;
     note: string;
