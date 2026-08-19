@@ -359,6 +359,25 @@ export function RadarDashboard() {
 
   const selected = useMemo(() => data?.advice.find(a => a.id === selectedId) ?? data?.advice[0] ?? null, [data, selectedId]);
   const selectedHistory = useMemo(() => selected ? historyFor(selected, history) : null, [selected, history]);
+  const motorwayStatus = useMemo(() => {
+    if (!data) return [];
+    return data.meta.roads.map(road => {
+      const rows = data.advice.filter(item => item.road === road);
+      const best = rows.slice().sort((a, b) => b.score - a.score)[0] ?? null;
+      const incidents = data.events.filter(event => event.roadRef === road).length;
+      const matrix = data.matrix.byRoad.find(item => item.road === road)?.active ?? 0;
+      const measured = rows.filter(item => item.sensorCount > 0).length;
+      return {
+        road,
+        best,
+        score: best?.score ?? 0,
+        incidents,
+        matrix,
+        measured,
+        hasLocation: rows.length > 0,
+      };
+    });
+  }, [data]);
   const activeStandby = stableStandby;
   const activeUnitCount = activeStandby.reduce((sum, advice) => sum + advice.recommendedUnits, 0);
   const next = nextRefreshAt ? Math.max(0, Math.ceil((nextRefreshAt - now) / 1000)) : 0;
@@ -377,7 +396,7 @@ export function RadarDashboard() {
         <div ref={mapEl} className="map" aria-label="Standby Radar kaart" />
         {loading && <div className="loading-card">LIVE BRONNEN LADEN…</div>}
         <div className="map-hud"><div className="stats">
-          <Stat label="Wegsegmenten" value={data?.meta.segmentCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} /><Stat label="Matrixacties" value={data?.matrix.activeSignals} />
+          <Stat label="Wegsegmenten" value={data?.meta.segmentCount} /><Stat label="Snelwegen" value={data?.meta.roadCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} />
         </div><div className="filters">
           <Filter label="Verkeer" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
           <Filter label="Incidenten" active={filters.incidents} onClick={() => setFilters(f => ({ ...f, incidents: !f.incidents }))} />
@@ -412,14 +431,20 @@ export function RadarDashboard() {
 
             <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 9} online</span></div><div className="sources">{data?.sources.map(source => <span key={source.id} className={source.ok ? "source source--ok" : "source"} title={`${source.lineage ?? ""}${source.updatedAt ? ` · ${clock(source.updatedAt)}` : ""}${source.error ? ` · ${source.error}` : ""}`}>{source.name}</span>)}{history && <span className={history.error ? "source" : "source source--ok"} title={history.note}>{history.error ? "BRON historie fout" : "RWS BRON historie"}</span>}</div></section>
 
-            <section className="block"><div className="block-title"><strong>LIVE WEGVAKANALYSE</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
+            <section className="block motorway-status-block"><div className="block-title"><strong>ALLE SNELWEGEN</strong><span>{data?.meta.roadCount ?? 0} gevolgd</span></div><div className="motorway-grid">
+              {motorwayStatus.map(status => <button key={status.road} className={`motorway-chip motorway-chip--${tone(status.score)} ${status.best ? "" : "motorway-chip--unlocated"}`} onClick={() => status.best && focus(status.best)} title={status.best ? `${status.road}: hoogste actuele score ${status.score}/100` : `${status.road}: wordt gevolgd; momenteel geen stand-byplek aan een segment gekoppeld`}>
+                <strong>{status.road}</strong><b>{status.best ? status.score : "•"}</b><small>{status.incidents ? `${status.incidents} inc` : status.matrix ? `${status.matrix} matrix` : status.measured ? "live" : "gevolgd"}</small>
+              </button>)}
+            </div><p className="motorway-note">Iedere A-weg uit het actuele IM-contract blijft in de analyse, ook zonder lokale meetlus of stand-byplek. Een bol verschijnt pas waar ook een bruikbare locatie aan het wegdeel kan worden gekoppeld.</p></section>
+
+            <section className="block"><div className="block-title"><strong>LIVE WEGVAKANALYSE</strong><span>{data?.advice.length ?? 0} met locatie</span></div><div className="advice-list">
               {data?.advice.slice(0, 12).map((advice, index) => { const hist = historyFor(advice, history); return <button key={advice.id} className={`advice-card ${selected?.id === advice.id ? "advice-card--selected" : ""}`} onClick={() => focus(advice)}>
                 <span className={`score score--${tone(advice.score)}`}>{advice.score}</span><span className="advice-copy"><strong>{index + 1}. {segmentLabel(advice)}<em>{advice.recommendedUnits}×</em></strong><small>Live kandidaat → {advice.standby.name} · {locationSource(advice)}</small><span>{speedLabel(advice.averageSpeedKph)} · {flowLabel(advice.flowVehiclesPerHour)} · {advice.sensorCount} meetpunt(en)</span>{hist.accidents > 0 && <small>Historie 2022–2024: {hist.accidents} ongeval(len) · risico {hist.score}/15</small>}<small>{advice.standby.address}</small></span>
               </button>; })}
               {!loading && data && data.advice.length === 0 && <div className="error-card">Geen live wegvakanalyse ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
             </div></section>
 
-            <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>De backend beperkt de analyse tot het gecontracteerde werkgebied. Stand-byposities worden bewust gestabiliseerd om onnodige verplaatsingen en lege kilometers te voorkomen.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
+            <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>Alle gecontracteerde A-wegvakken worden gemonitord. Stand-byposities worden bewust gestabiliseerd om onnodige verplaatsingen en lege kilometers te voorkomen.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
           </div>
 
           {selected && <section className="why-card why-card--fixed"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{segmentLabel(selected)}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
