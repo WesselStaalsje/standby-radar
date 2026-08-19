@@ -1,0 +1,6 @@
+import { gunzipSync } from "node:zlib";
+import { NextResponse } from "next/server";
+export const dynamic="force-dynamic"; export const runtime="nodejs";
+const feeds={sites:"https://opendata.ndw.nu/measurement_current.xml.gz",traffic:"https://opendata.ndw.nu/trafficspeed.xml.gz"};
+async function load(url:string){const r=await fetch(url,{cache:"no-store"});const b=Buffer.from(await r.arrayBuffer());const text=b[0]===31&&b[1]===139?gunzipSync(b).toString("utf8"):b.toString("utf8");const tags=[...text.matchAll(/<([A-Za-z0-9_:-]+)/g)].slice(0,300).map(m=>m[1]);const uniq=[...new Set(tags)];return{status:r.status,length:text.length,head:text.slice(0,12000),uniqueHeadTags:uniq,counts:{measurementSiteRecord:(text.match(/measurementSiteRecord/g)||[]).length,measurementSite:(text.match(/measurementSite/g)||[]).length,measurementSpecificCharacteristics:(text.match(/measurementSpecificCharacteristics/g)||[]).length,measuredValue:(text.match(/measuredValue/g)||[]).length,physicalQuantity:(text.match(/physicalQuantity/g)||[]).length,siteMeasurements:(text.match(/siteMeasurements/g)||[]).length}};}
+export async function GET(){const [sites,traffic]=await Promise.all([load(feeds.sites),load(feeds.traffic)]);return NextResponse.json({sites,traffic});}
