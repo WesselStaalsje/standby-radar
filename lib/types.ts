@@ -27,8 +27,9 @@ export type StandbyLocation = {
   address: string;
   lat: number;
   lng: number;
-  kind: "restaurant" | "service_area" | "parking" | "other";
-  knownOperationalLocation: boolean;
+  kind: "restaurant" | "service_area" | "parking" | "fuel" | "carpool" | "other";
+  source: "rws" | "osm";
+  verified: boolean;
 };
 
 export type StandbyAdvice = {
@@ -91,6 +92,7 @@ export type LiveRadarData = {
     closureCount: number;
     segmentCount: number;
     measuredSiteCount: number;
+    candidateLocationCount: number;
     rushHour: boolean;
     modelVersion: string;
     note: string;
