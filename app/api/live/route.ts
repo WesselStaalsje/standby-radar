@@ -1,6 +1,14 @@
 import { gunzipSync } from "node:zlib";
 import { NextResponse } from "next/server";
-import type { MatrixRoadSummary, SourceStatus, StandbyAdvice, TrafficEvent, TrafficKind, WeatherSnapshot } from "@/lib/types";
+import type {
+  MatrixRoadSummary,
+  SourceStatus,
+  StandbyAdvice,
+  StandbyLocation,
+  TrafficEvent,
+  TrafficKind,
+  WeatherSnapshot,
+} from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -9,20 +17,19 @@ const NDW_CURRENT_URL = "https://opendata.ndw.nu/actueel_beeld.xml.gz";
 const NDW_MSI_URL = "https://opendata.ndw.nu/Matrixsignaalinformatie.xml.gz";
 const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
 
-const REGION = { minLat: 51.15, maxLat: 52.30, minLng: 4.25, maxLng: 6.55 };
+const REGION = { minLat: 51.15, maxLat: 52.30, minLng: 4.20, maxLng: 6.55 };
+const SEGMENT_LENGTH_KM = 5;
+const MAX_STANDBY_ROAD_DISTANCE_KM = 15;
 
-const ZONES = [
-  { id: "eindhoven-best", name: "Eindhoven-Noord / Best", province: "Noord-Brabant", lat: 51.505, lng: 5.445, roads: ["A2", "A50", "A58"] },
-  { id: "den-bosch", name: "'s-Hertogenbosch", province: "Noord-Brabant", lat: 51.704, lng: 5.337, roads: ["A2", "A59"] },
-  { id: "paalgraven", name: "Paalgraven / Oss", province: "Noord-Brabant", lat: 51.75, lng: 5.53, roads: ["A50", "A59"] },
-  { id: "breda", name: "Breda", province: "Noord-Brabant", lat: 51.565, lng: 4.755, roads: ["A16", "A27", "A58"] },
-  { id: "tilburg", name: "Tilburg", province: "Noord-Brabant", lat: 51.565, lng: 5.045, roads: ["A58", "A65"] },
-  { id: "deil", name: "Deil", province: "Gelderland", lat: 51.885, lng: 5.245, roads: ["A2", "A15"] },
-  { id: "valburg", name: "Valburg / Elst", province: "Gelderland", lat: 51.91, lng: 5.79, roads: ["A15", "A50", "A325"] },
-  { id: "arnhem", name: "Arnhem / Grijsoord", province: "Gelderland", lat: 52.01, lng: 5.82, roads: ["A12", "A50"] },
-  { id: "ede", name: "Ede / Maanderbroek", province: "Gelderland", lat: 52.025, lng: 5.65, roads: ["A12", "A30"] },
-  { id: "apeldoorn", name: "Apeldoorn / Beekbergen", province: "Gelderland", lat: 52.155, lng: 5.965, roads: ["A1", "A50"] },
-] as const;
+type CandidateLocation = StandbyLocation & {
+  roadPositions: Array<{ road: string; km: number }>;
+};
+
+type RoadRange = {
+  road: string;
+  from: number;
+  to: number;
+};
 
 type MatrixSignal = {
   signId: string;
@@ -33,6 +40,47 @@ type MatrixSignal = {
   display: "speed" | "lane_closed" | "lane_closed_ahead" | "lane_open" | "restriction_end" | "blank" | "unknown";
   speedLimit: number | null;
 };
+
+const STANDBY_LOCATIONS: CandidateLocation[] = [
+  {
+    id: "gouden-leeuw-zevenbergschen-hoek",
+    name: "De Gouden Leeuw",
+    address: "Moerdijkseweg 1, 4765 SJ Zevenbergschen Hoek",
+    lat: 51.685051,
+    lng: 4.656334,
+    kind: "restaurant",
+    knownOperationalLocation: true,
+    roadPositions: [{ road: "A16", km: 50.5 }],
+  },
+  {
+    id: "wouwse-tol-noord",
+    name: "Wouwse Tol Noord",
+    address: "Rijksweg A58 11, 4623 RM Bergen op Zoom",
+    lat: 51.505325,
+    lng: 4.349858,
+    kind: "service_area",
+    knownOperationalLocation: true,
+    roadPositions: [{ road: "A58", km: 101.2 }],
+  },
+  {
+    id: "mcdonalds-beuningen",
+    name: "McDonald's Beuningen",
+    address: "Hadrianussingel 37, 6642 AH Beuningen",
+    lat: 51.855783,
+    lng: 5.751205,
+    kind: "restaurant",
+    knownOperationalLocation: true,
+    roadPositions: [{ road: "A73", km: 112.0 }],
+  },
+];
+
+// Eerste corridors rond gevalideerde operationele stand-byplaatsen.
+// Nieuwe locaties kunnen later aan dezelfde 5-km segmentstructuur worden toegevoegd.
+const ROAD_RANGES: RoadRange[] = [
+  { road: "A16", from: 40, to: 70 },
+  { road: "A58", from: 85, to: 110 },
+  { road: "A73", from: 95, to: 115 },
+];
 
 const decodeXml = (value: string) => value
   .replace(/&amp;/g, "&")
@@ -53,7 +101,7 @@ const hasTag = (xml: string, tag: string) => new RegExp(`<(?:(?:[A-Za-z0-9_-]+):
 const numberTag = (xml: string, tag: string) => {
   const raw = tagValue(xml, tag);
   if (raw === null) return null;
-  const value = Number(stripTags(raw));
+  const value = Number(stripTags(raw).replace(",", "."));
   return Number.isFinite(value) ? value : null;
 };
 
@@ -97,15 +145,14 @@ const findCoordinates = (body: string) => {
 const inRegion = (lat: number, lng: number) => lat >= REGION.minLat && lat <= REGION.maxLat && lng >= REGION.minLng && lng <= REGION.maxLng;
 
 const roadRef = (body: string) => {
-  for (const tag of ["roadNumber", "roadName"]) {
+  for (const tag of ["roadNumber", "roadName", "roadNameAtOrigin", "roadNameAtDestination"]) {
     const raw = tagValue(body, tag);
     if (raw) {
       const match = /\b(?:A|N)\s?\d{1,3}\b/i.exec(stripTags(raw));
       if (match) return match[0].replace(/\s/g, "").toUpperCase();
     }
   }
-  const match = /\b(?:A|N)\s?\d{1,3}\b/i.exec(stripTags(body));
-  return match ? match[0].replace(/\s/g, "").toUpperCase() : null;
+  return null;
 };
 
 const sourceName = (body: string) => {
@@ -119,7 +166,7 @@ const freshEnough = (kind: TrafficKind, updatedAt: string | null) => {
   const time = Date.parse(updatedAt);
   if (!Number.isFinite(time)) return true;
   const ageMinutes = (Date.now() - time) / 60_000;
-  const maxAge = kind === "works" || kind === "closure" ? 24 * 60 : kind === "weather" ? 6 * 60 : 3 * 60;
+  const maxAge = kind === "works" || kind === "closure" ? 24 * 60 : kind === "weather" ? 6 * 60 : 180;
   return ageMinutes <= maxAge;
 };
 
@@ -227,95 +274,102 @@ const haversineKm = (a: { lat: number; lng: number }, b: { lat: number; lng: num
   return 6371 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 };
 
-const impact = (event: TrafficEvent) => {
-  if (event.kind === "accident") return 16;
-  if (event.kind === "closure") return 13;
-  if (event.kind === "obstruction") return 10;
-  if (event.kind === "traffic") return Math.min(13, 7 + Math.max(0, (event.queueLengthMeters ?? 0) / 1000) * 1.5);
-  if (event.kind === "weather") return 6;
-  return 3;
+const eventImpact = (event: TrafficEvent) => {
+  if (event.kind === "accident") return 13;
+  if (event.kind === "closure") return 11;
+  if (event.kind === "obstruction") return 7;
+  if (event.kind === "traffic") return Math.min(14, 8 + Math.max(0, (event.queueLengthMeters ?? 0) / 1000) * 1.5);
+  if (event.kind === "weather") return 5;
+  return 2;
 };
 
-const matrixScore = (signals: MatrixSignal[], roads: readonly string[]) => {
-  const clusters = new Map<string, number>();
-  for (const signal of signals.filter(activeMatrix)) {
-    if (!signal.road || !roads.includes(signal.road)) continue;
-    const bucket = signal.km === null ? signal.signId : (Math.round(signal.km * 2) / 2).toFixed(1);
-    const key = `${signal.road}:${signal.carriageway ?? "?"}:${bucket}`;
-    let value = 0;
-    if (signal.display === "lane_closed") value = 3.5;
-    else if (signal.display === "lane_closed_ahead") value = 2.5;
-    else if ((signal.speedLimit ?? 999) <= 50) value = 1.4;
-    else if ((signal.speedLimit ?? 999) <= 70) value = 0.9;
-    else if ((signal.speedLimit ?? 999) <= 90) value = 0.4;
-    clusters.set(key, Math.max(clusters.get(key) ?? 0, value));
+const buildSegments = () => ROAD_RANGES.flatMap((range) => {
+  const segments: Array<{ road: string; kmFrom: number; kmTo: number; centerKm: number }> = [];
+  for (let from = range.from; from < range.to; from += SEGMENT_LENGTH_KM) {
+    const to = Math.min(range.to, from + SEGMENT_LENGTH_KM);
+    segments.push({ road: range.road, kmFrom: from, kmTo: to, centerKm: (from + to) / 2 });
   }
-  return { clusters: clusters.size, score: Math.min(14, [...clusters.values()].reduce((sum, value) => sum + value, 0)) };
+  return segments;
+});
+
+const findStandby = (road: string, centerKm: number) => {
+  const matches = STANDBY_LOCATIONS.flatMap((location) => location.roadPositions
+    .filter((position) => position.road === road)
+    .map((position) => ({ location, roadKm: position.km, distanceKm: Math.abs(position.km - centerKm) })));
+  const best = matches.sort((a, b) => a.distanceKm - b.distanceKm)[0];
+  return best && best.distanceKm <= MAX_STANDBY_ROAD_DISTANCE_KM ? best : null;
+};
+
+const segmentMatrixScore = (signals: MatrixSignal[], road: string, kmFrom: number, kmTo: number) => {
+  const relevant = signals.filter((signal) => signal.road === road && signal.km !== null && signal.km >= kmFrom && signal.km < kmTo && activeMatrix(signal));
+  const clusters = new Map<string, { score: number; low: boolean; closed: boolean }>();
+  for (const signal of relevant) {
+    const bucket = `${signal.carriageway ?? "?"}:${Math.floor((signal.km ?? 0) * 10) / 10}`;
+    let score = 0;
+    let low = false;
+    let closed = false;
+    if (signal.display === "lane_closed") { score = 8; closed = true; }
+    else if (signal.display === "lane_closed_ahead") { score = 6; closed = true; }
+    else if ((signal.speedLimit ?? 999) <= 50) { score = 5; low = true; }
+    else if ((signal.speedLimit ?? 999) <= 70) { score = 3; low = true; }
+    else if ((signal.speedLimit ?? 999) <= 90) score = 1;
+    const old = clusters.get(bucket);
+    if (!old || score > old.score) clusters.set(bucket, { score, low, closed });
+  }
+  const values = [...clusters.values()];
+  return {
+    score: Math.min(48, values.reduce((sum, value) => sum + value.score, 0)),
+    clusters: values.length,
+    lowSpeed: values.filter((value) => value.low).length,
+    closures: values.filter((value) => value.closed).length,
+  };
+};
+
+const rushHour = () => {
+  const hour = Number(new Intl.DateTimeFormat("nl-NL", { timeZone: "Europe/Amsterdam", hour: "2-digit", hour12: false }).format(new Date()));
+  return (hour >= 6 && hour < 10) || (hour >= 15 && hour < 19);
 };
 
 const weatherScore = (weather: WeatherSnapshot | null) => {
   if (!weather) return 0;
   let score = 0;
-  if (weather.precipitation >= 5) score += 12;
-  else if (weather.precipitation >= 2) score += 8;
-  else if (weather.precipitation >= 0.5) score += 5;
-  else if (weather.precipitation > 0) score += 2;
-  if (weather.windGusts >= 80) score += 8;
-  else if (weather.windGusts >= 60) score += 5;
-  else if (weather.windGusts >= 45) score += 3;
-  if (weather.visibility > 0 && weather.visibility < 1500) score += 7;
-  else if (weather.visibility > 0 && weather.visibility < 4000) score += 4;
-  return Math.min(22, score);
-};
-
-const rushHour = () => {
-  const hour = Number(new Intl.DateTimeFormat("nl-NL", { timeZone: "Europe/Amsterdam", hour: "2-digit", hourCycle: "h23" }).format(new Date()));
-  return (hour >= 7 && hour < 10) || (hour >= 15 && hour < 19);
-};
-
-const reasonsFor = (nearby: { event: TrafficEvent; distance: number }[], matrixClusters: number, weather: WeatherSnapshot | null, isRush: boolean) => {
-  const reasons: string[] = [];
-  const accidents = nearby.filter((item) => item.event.kind === "accident");
-  const obstructions = nearby.filter((item) => item.event.kind === "obstruction" || item.event.kind === "closure");
-  const traffic = nearby.filter((item) => item.event.kind === "traffic");
-  if (accidents.length) reasons.push(`${accidents.length} actueel ongeval${accidents.length === 1 ? "" : "len"} in de omgeving`);
-  if (obstructions.length) reasons.push(`${obstructions.length} actuele blokkade${obstructions.length === 1 ? "" : "s"} / obstakels`);
-  if (traffic.length) reasons.push(`${traffic.length} live file-/vertragingssignaal${traffic.length === 1 ? "" : "en"}`);
-  if (matrixClusters) reasons.push(`${matrixClusters} actieve matrixcluster${matrixClusters === 1 ? "" : "s"} op relevante A-wegen`);
-  if ((weather?.precipitation ?? 0) >= 0.5) reasons.push(`${weather!.precipitation.toLocaleString("nl-NL", { maximumFractionDigits: 1 })} mm neerslag`);
-  if ((weather?.windGusts ?? 0) >= 45) reasons.push(`windstoten rond ${Math.round(weather!.windGusts)} km/u`);
-  if (isRush) reasons.push("spitsfactor actief");
-  if (!reasons.length) reasons.push("geen sterke actuele risicosignalen");
-  return reasons.slice(0, 4);
+  if (weather.precipitation >= 2) score += 7;
+  else if (weather.precipitation >= 0.2) score += 3;
+  if (weather.windGusts >= 70) score += 6;
+  else if (weather.windGusts >= 50) score += 3;
+  if (weather.visibility > 0 && weather.visibility < 2000) score += 6;
+  else if (weather.visibility > 0 && weather.visibility < 5000) score += 3;
+  return Math.min(12, score);
 };
 
 const fetchXml = async (url: string) => {
-  const response = await fetch(url, { cache: "no-store", headers: { Accept: "application/xml,*/*", "User-Agent": "StandbyRadar/0.1" } });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await fetch(url, { cache: "no-store", headers: { "user-agent": "StandbyRadar/0.2" } });
+  if (!response.ok) throw new Error(`Upstream HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const text = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes).toString("utf8") : bytes.toString("utf8");
   return { text, updatedAt: response.headers.get("last-modified") };
 };
 
-const fetchWeather = async (): Promise<WeatherSnapshot[]> => {
-  const url = new URL(OPEN_METEO_URL);
-  url.searchParams.set("latitude", ZONES.map((zone) => zone.lat).join(","));
-  url.searchParams.set("longitude", ZONES.map((zone) => zone.lng).join(","));
-  url.searchParams.set("current", "precipitation,weather_code,wind_gusts_10m,visibility");
-  url.searchParams.set("timezone", "Europe/Amsterdam");
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const json = await response.json() as unknown;
-  const rows = Array.isArray(json) ? json : [json];
-  return rows.map((row) => {
-    const current = (row as { current?: Record<string, unknown> }).current ?? {};
+const fetchWeather = async () => {
+  const params = new URLSearchParams({
+    latitude: STANDBY_LOCATIONS.map((location) => location.lat).join(","),
+    longitude: STANDBY_LOCATIONS.map((location) => location.lng).join(","),
+    current: "precipitation,wind_gusts_10m,visibility,weather_code",
+    timezone: "Europe/Amsterdam",
+  });
+  const response = await fetch(`${OPEN_METEO_URL}?${params}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Open-Meteo HTTP ${response.status}`);
+  const raw = await response.json() as unknown;
+  const items = Array.isArray(raw) ? raw : [raw];
+  return items.map((item) => {
+    const current = (item as { current?: Record<string, unknown> }).current ?? {};
     return {
       precipitation: Number(current.precipitation ?? 0),
       windGusts: Number(current.wind_gusts_10m ?? 0),
-      visibility: Number(current.visibility ?? 10_000),
-      weatherCode: Number.isFinite(Number(current.weather_code)) ? Number(current.weather_code) : null,
+      visibility: Number(current.visibility ?? 0),
+      weatherCode: current.weather_code === undefined ? null : Number(current.weather_code),
       observedAt: typeof current.time === "string" ? current.time : null,
-    };
+    } satisfies WeatherSnapshot;
   });
 };
 
@@ -346,32 +400,71 @@ export async function GET() {
   ]);
 
   const isRush = rushHour();
-  const advice: StandbyAdvice[] = ZONES.map((zone, index) => {
-    const nearby = events
-      .map((event) => ({ event, distance: haversineKm(zone, event) }))
-      .filter((item) => item.distance <= 45)
+  const weatherByLocation = new Map(STANDBY_LOCATIONS.map((location, index) => [location.id, weather[index] ?? null]));
+
+  const advice: StandbyAdvice[] = buildSegments().flatMap((segment) => {
+    const standbyMatch = findStandby(segment.road, segment.centerKm);
+    if (!standbyMatch) return [];
+    const { location, roadKm, distanceKm: standbyRoadDistance } = standbyMatch;
+    const msi = segmentMatrixScore(matrix, segment.road, segment.kmFrom, segment.kmTo);
+    const local = events
+      .map((event) => ({ event, distance: haversineKm(location, event) }))
+      .filter((item) => item.distance <= 8 && (!item.event.roadRef || item.event.roadRef === segment.road))
       .sort((a, b) => a.distance - b.distance);
-    const strongest = nearby
-      .map((item) => impact(item.event) * Math.max(0.12, 1 - item.distance / 50))
+    const localImpacts = local
+      .map((item) => eventImpact(item.event) * Math.max(0.15, 1 - item.distance / 9))
       .sort((a, b) => b - a)
-      .slice(0, 5);
-    const eventScore = Math.min(45, strongest.reduce((sum, value) => sum + value, 0));
-    const msi = matrixScore(matrix, zone.roads);
-    const currentWeather = weather[index] ?? null;
-    const score = Math.min(96, Math.round(8 + (isRush ? 8 : 2) + eventScore + msi.score + weatherScore(currentWeather)));
+      .slice(0, 3);
+    const eventScore = Math.min(28, localImpacts.reduce((sum, value) => sum + value, 0));
+    const proximityPenalty = Math.min(14, Math.round(standbyRoadDistance * 0.8));
+    const currentWeather = weatherByLocation.get(location.id) ?? null;
+    const score = Math.max(0, Math.min(96, Math.round(8 + (isRush ? 5 : 1) + msi.score + eventScore + weatherScore(currentWeather) - proximityPenalty)));
     const sourceCount = sources.filter((source) => source.ok).length;
-    const confidence: StandbyAdvice["confidence"] = sourceCount === 3 && nearby.length ? "hoog" : sourceCount >= 2 ? "middel" : "laag";
-    return {
-      ...zone,
+    const confidence: StandbyAdvice["confidence"] = sourceCount === 3 && (msi.clusters > 0 || local.length > 0) ? "hoog" : sourceCount >= 2 ? "middel" : "laag";
+    const pressure: StandbyAdvice["pressure"] = score >= 65 ? "hoog" : score >= 38 ? "verhoogd" : "rustig";
+    const accidents = local.filter((item) => item.event.kind === "accident").length;
+    const obstructions = local.filter((item) => item.event.kind === "obstruction" || item.event.kind === "closure").length;
+    const reasons = [
+      `${segment.road} km ${segment.kmFrom.toFixed(0)}–${segment.kmTo.toFixed(0)} wordt apart beoordeeld`,
+      msi.clusters ? `${msi.clusters} actieve matrixclusters binnen precies dit 5-km segment` : "geen actieve matrixmaatregelen binnen dit 5-km segment",
+      msi.lowSpeed ? `${msi.lowSpeed} clusters met 70 km/u of lager` : null,
+      msi.closures ? `${msi.closures} cluster(s) met rijstrooksluiting` : null,
+      accidents ? `${accidents} actueel ongeval(len) binnen 8 km van de stand-byplek` : null,
+      obstructions ? `${obstructions} actuele blokkade(s) / obstakels nabij de stand-byplek` : null,
+      `stand-byplek ligt circa ${Math.abs(roadKm - segment.centerKm).toFixed(1)} weg-km van het segmentmidden`,
+      isRush ? "spitsfactor actief" : null,
+    ].filter((reason): reason is string => Boolean(reason));
+
+    return [{
+      id: `${segment.road}-${segment.kmFrom}-${segment.kmTo}`,
+      road: segment.road,
+      segmentName: `${segment.road} km ${segment.kmFrom.toFixed(0)}–${segment.kmTo.toFixed(0)}`,
+      kmFrom: segment.kmFrom,
+      kmTo: segment.kmTo,
+      centerLat: location.lat,
+      centerLng: location.lng,
       score,
+      pressure,
       confidence,
-      recommendedUnits: score >= 80 ? 2 : score >= 52 ? 1 : 0,
-      nearbyEvents: nearby.length,
+      recommendedUnits: score >= 72 ? 2 : score >= 38 ? 1 : 0,
+      localEvents: local.length,
+      accidents,
+      obstructions,
       matrixClusters: msi.clusters,
-      reasons: reasonsFor(nearby, msi.clusters, currentWeather, isRush),
+      lowSpeedMatrixClusters: msi.lowSpeed,
+      reasons,
       weather: currentWeather,
-    };
-  }).sort((a, b) => b.score - a.score);
+      standby: {
+        id: location.id,
+        name: location.name,
+        address: location.address,
+        lat: location.lat,
+        lng: location.lng,
+        kind: location.kind,
+        knownOperationalLocation: location.knownOperationalLocation,
+      },
+    }];
+  }).sort((a, b) => b.score - a.score || a.road.localeCompare(b.road) || a.kmFrom - b.kmFrom);
 
   const byRoad = matrixSummary(matrix);
   const activeSignals = byRoad.reduce((sum, item) => sum + item.active, 0);
@@ -390,9 +483,10 @@ export async function GET() {
       obstructionCount: events.filter((event) => event.kind === "obstruction").length,
       trafficCount: events.filter((event) => event.kind === "traffic").length,
       closureCount: events.filter((event) => event.kind === "closure").length,
+      segmentCount: advice.length,
       rushHour: isRush,
-      modelVersion: "0.1-live",
-      note: "Adviespunten zijn corridorzones, nog geen gevalideerde parkeerlocaties. Gebruik het advies als beslisondersteuning en niet als automatische inzetopdracht.",
+      modelVersion: "0.2-segment-5km",
+      note: "Stand-by advies wordt nu per 5-km snelwegsegment berekend. Alleen segmenten met een bekende geschikte stand-byplek binnen 15 weg-km worden getoond; er worden geen willekeurige parkeerplaatsen als veilig aangenomen.",
     },
   }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
