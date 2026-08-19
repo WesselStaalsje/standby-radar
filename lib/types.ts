@@ -12,6 +12,10 @@ export type TrafficEvent = {
   source: string | null;
   updatedAt: string | null;
   rayon?: string | null;
+  roadKm?: number | null;
+  startsAt?: string | null;
+  endsAt?: string | null;
+  planned?: boolean;
 };
 
 export type WeatherSnapshot = {
@@ -54,9 +58,17 @@ export type StandbyAdvice = {
   matrixClusters: number;
   lowSpeedMatrixClusters: number;
   corroboratingSignals: number;
+  corroboratingSignalMax?: number;
   reasons: string[];
   weather: WeatherSnapshot | null;
   standby: StandbyLocation;
+  travelTimeSampleCount?: number;
+  fcdAverageSpeedKph?: number | null;
+  temporarySpeedLimitKph?: number | null;
+  dripSignalCount?: number;
+  plannedEventCount?: number;
+  srtiConfirmed?: boolean;
+  supplementalScore?: number;
 };
 
 export type RayonRoadOverlay = {
@@ -115,5 +127,16 @@ export type LiveRadarData = {
     rushHour: boolean;
     modelVersion: string;
     note: string;
+    tomtomConfigured?: boolean;
+    tomtomCoverageSegments?: number;
+    tomtomTileCount?: number;
+    travelTimeSiteCount?: number;
+    travelTimeSampleCount?: number;
+    fcdCoverageSegments?: number;
+    dripSignalCount?: number;
+    plannedEventCount?: number;
+    temporarySpeedRestrictionCount?: number;
+    srtiEventCount?: number;
+    bridgeEventCount?: number;
   };
 };
