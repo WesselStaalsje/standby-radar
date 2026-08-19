@@ -1,11 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   poweredByHeader: false,
-  async rewrites() {
+  async redirects() {
     return [
       {
         source: "/api/live",
         destination: "/api/live-v3",
+        permanent: false,
       },
     ];
   },
