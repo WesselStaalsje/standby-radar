@@ -27,7 +27,7 @@ export type StandbyAdvice = {
   province: string;
   lat: number;
   lng: number;
-  roads: string[];
+  roads: readonly string[];
   score: number;
   confidence: "hoog" | "middel" | "laag";
   recommendedUnits: number;
