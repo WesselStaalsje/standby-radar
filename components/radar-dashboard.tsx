@@ -23,6 +23,7 @@ export function RadarDashboard() {
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const layerRef = useRef<LayerGroup | null>(null);
+  const requestSeq = useRef(0);
   const [mapReady, setMapReady] = useState(false);
   const [data, setData] = useState<LiveRadarData | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -32,17 +33,53 @@ export function RadarDashboard() {
   const [now, setNow] = useState(Date.now());
   const [filters, setFilters] = useState<Filters>({ traffic: true, incidents: true, works: false, advice: true });
 
+  const fetchPayload = useCallback(async () => {
+    const r = await fetch(`/api/live?_=${Date.now()}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`Live feed HTTP ${r.status}`);
+    return await r.json() as LiveRadarData;
+  }, []);
+
   const load = useCallback(async (manual = false) => {
+    const seq = ++requestSeq.current;
     if (manual) setRefreshing(true);
     try {
-      const r = await fetch("/api/live", { cache: "no-store" });
-      if (!r.ok) throw new Error(`Live feed HTTP ${r.status}`);
-      const payload = await r.json() as LiveRadarData;
-      setData(payload); setError(null);
-      setSelectedId(current => current && payload.advice.some(a => a.id === current) ? current : payload.advice[0]?.id ?? null);
-    } catch (e) { setError(e instanceof Error ? e.message : "Live data kon niet geladen worden"); }
-    finally { setLoading(false); setRefreshing(false); }
-  }, []);
+      let payload = await fetchPayload();
+      const shouldHaveAdvice = payload.meta.segmentCount > 0 && payload.meta.candidateLocationCount > 0;
+
+      if (shouldHaveAdvice && payload.advice.length === 0) {
+        await new Promise(resolve => window.setTimeout(resolve, 900));
+        if (seq !== requestSeq.current) return;
+        payload = await fetchPayload();
+      }
+
+      if (seq !== requestSeq.current) return;
+
+      setData(current => {
+        if (payload.advice.length === 0 && current?.advice.length) {
+          return { ...payload, advice: current.advice };
+        }
+        return payload;
+      });
+
+      setSelectedId(current => {
+        const effectiveAdvice = payload.advice.length ? payload.advice : data?.advice ?? [];
+        return current && effectiveAdvice.some(a => a.id === current) ? current : effectiveAdvice[0]?.id ?? null;
+      });
+
+      if (payload.meta.segmentCount > 0 && payload.meta.candidateLocationCount > 0 && payload.advice.length === 0) {
+        setError("Live brondata is binnen, maar de stand-byselectie leverde tijdelijk geen locaties op. Vorige geldige adviezen blijven zichtbaar.");
+      } else {
+        setError(null);
+      }
+    } catch (e) {
+      if (seq === requestSeq.current) setError(e instanceof Error ? e.message : "Live data kon niet geladen worden");
+    } finally {
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, [data?.advice, fetchPayload]);
 
   useEffect(() => {
     void load();
@@ -114,10 +151,11 @@ export function RadarDashboard() {
       <aside className="sidebar"><div className="side-scroll">
         {error && <div className="error-card">{error}</div>}
         <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 8} online</span></div><div className="sources">{data?.sources.map(s => <span key={s.id} className={s.ok ? "source source--ok" : "source"} title={`${s.lineage ?? ""}${s.updatedAt ? ` · ${clock(s.updatedAt)}` : ""}${s.error ? ` · ${s.error}` : ""}`}>{s.name}</span>)}</div></section>
-        <section className="block"><div className="block-title"><strong>LIVE STAND-BYADVIES</strong><span>drukte bepaalt locatie</span></div><div className="advice-list">
+        <section className="block"><div className="block-title"><strong>LIVE STAND-BYADVIES</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
           {data?.advice.slice(0, 12).map((a, i) => <button key={a.id} className={`advice-card ${selected?.id === a.id ? "advice-card--selected" : ""}`} onClick={() => focus(a)}>
             <span className={`score score--${tone(a.score)}`}>{a.score}</span><span className="advice-copy"><strong>{i + 1}. {a.segmentName}<em>{a.recommendedUnits}×</em></strong><small>→ {a.standby.name} · {locationSource(a)}</small><span>{speedLabel(a.averageSpeedKph)} · {flowLabel(a.flowVehiclesPerHour)} · {a.sensorCount} meetpunt(en)</span><small>{a.standby.address}</small></span>
           </button>)}
+          {!loading && data && data.advice.length === 0 && <div className="error-card">Geen stand-byadviezen ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
         </div></section>
         {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{selected.segmentName}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
           <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Incidenten lokaal" value={selected.localEvents} /></div>
