@@ -5,7 +5,7 @@ const nextConfig = {
     return [
       {
         source: "/api/live",
-        destination: "/api/live-v2",
+        destination: "/api/live-v3",
       },
     ];
   },
