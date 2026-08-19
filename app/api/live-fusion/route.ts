@@ -19,14 +19,34 @@ export async function GET() {
     return !planningSource || event.planned === true;
   });
 
-  const advice = data.advice.map(item => ({
-    ...item,
-    // Existing UI was designed around a four-step confidence meter. Keep the
-    // displayed value bounded while all supplemental sources still influence
-    // score/confidence and remain visible in the explanation/source status.
-    corroboratingSignals: Math.min(4, item.corroboratingSignals),
-    corroboratingSignalMax: 4,
-  }));
+  const advice = data.advice.map(item => {
+    const fcdOutOfCalibrationRange = item.fcdAverageSpeedKph !== null
+      && item.fcdAverageSpeedKph !== undefined
+      && item.fcdAverageSpeedKph > 135;
+
+    const reasons = fcdOutOfCalibrationRange
+      ? item.reasons.map(reason => reason.startsWith("NDW reistijden:")
+          ? reason.replace(
+              /afgeleide snelheid [0-9.]+ km\/u(?: · kwaliteit \d+%)?\./,
+              "vrije doorstroming; ruwe trajectsnelheid boven kalibratiebereik.",
+            )
+          : reason)
+      : item.reasons;
+
+    return {
+      ...item,
+      reasons,
+      // Do not publish an exact value outside the calibrated range. It already
+      // contributes zero congestion points in v4; null here prevents a future
+      // UI from presenting an unreliable raw trajectory speed as precision.
+      fcdAverageSpeedKph: fcdOutOfCalibrationRange ? null : item.fcdAverageSpeedKph,
+      // Existing UI was designed around a four-step confidence meter. Keep the
+      // displayed value bounded while all supplemental sources still influence
+      // score/confidence and remain visible in the explanation/source status.
+      corroboratingSignals: Math.min(4, item.corroboratingSignals),
+      corroboratingSignalMax: 4,
+    };
+  });
 
   const futurePlanning = events.filter(event => event.source === "NDW planning" && event.planned).length;
   const futureBridges = events.filter(event => event.source === "NDW brugopeningen" && event.planned).length;
@@ -45,7 +65,7 @@ export async function GET() {
       plannedEventCount: futurePlanning,
       bridgeEventCount: futureBridges,
       modelVersion: "1.0-ndw-multisource-fusion",
-      note: `${data.meta.note} De aparte planningfeed wordt op de kaart alleen vooruitkijkend gebruikt; langlopende projectrecords worden niet als actuele incidentmarkers getoond.`,
+      note: `${data.meta.note} De aparte planningfeed wordt op de kaart alleen vooruitkijkend gebruikt; langlopende projectrecords worden niet als actuele incidentmarkers getoond. FCD-trajectsnelheden boven 135 km/u worden alleen als vrije doorstroming geïnterpreteerd en niet als exact kalibratiegetal gepubliceerd.`,
     },
   }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
