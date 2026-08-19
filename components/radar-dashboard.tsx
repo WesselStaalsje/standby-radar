@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayerGroup, Map as LeafletMap } from "leaflet";
 import type { LiveRadarData, StandbyAdvice, TrafficKind } from "@/lib/types";
 
-type Filters = { traffic: boolean; incidents: boolean; works: boolean; advice: boolean };
+type Filters = { rayons: boolean; traffic: boolean; incidents: boolean; works: boolean; advice: boolean };
 
 const colors: Record<TrafficKind, string> = {
   traffic: "#f1a34b", accident: "#e44c4c", obstruction: "#df7a43",
@@ -25,6 +25,7 @@ export function RadarDashboard() {
   const layerRef = useRef<LayerGroup | null>(null);
   const requestSeq = useRef(0);
   const lastGoodAdvice = useRef<StandbyAdvice[]>([]);
+  const fittedRayons = useRef(false);
   const [mapReady, setMapReady] = useState(false);
   const [data, setData] = useState<LiveRadarData | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -32,7 +33,7 @@ export function RadarDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
-  const [filters, setFilters] = useState<Filters>({ traffic: true, incidents: true, works: false, advice: true });
+  const [filters, setFilters] = useState<Filters>({ rayons: true, traffic: true, incidents: true, works: false, advice: true });
 
   const fetchPayload = useCallback(async () => {
     const r = await fetch(`/api/live?_=${Date.now()}`, { cache: "no-store" });
@@ -92,72 +93,173 @@ export function RadarDashboard() {
       leafletRef.current = L;
       const map = L.map(mapEl.current, { center: [51.75, 5.45], zoom: 8, zoomControl: false, preferCanvas: true });
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
-      L.control.zoom({ position: "bottomright" }).addTo(map); L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
-      layerRef.current = L.layerGroup().addTo(map); map.fitBounds([[51.2, 4.2], [52.3, 6.55]], { padding: [20, 20] });
-      mapRef.current = map; setMapReady(true); setTimeout(() => map.invalidateSize(), 60);
+      L.control.zoom({ position: "bottomright" }).addTo(map);
+      L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
+      layerRef.current = L.layerGroup().addTo(map);
+      map.fitBounds([[51.2, 4.2], [52.3, 6.55]], { padding: [20, 20] });
+      mapRef.current = map;
+      setMapReady(true);
+      setTimeout(() => map.invalidateSize(), 60);
     })();
-    return () => { dead = true; mapRef.current?.remove(); mapRef.current = null; leafletRef.current = null; layerRef.current = null; };
+    return () => {
+      dead = true;
+      mapRef.current?.remove();
+      mapRef.current = null;
+      leafletRef.current = null;
+      layerRef.current = null;
+      fittedRayons.current = false;
+    };
   }, []);
 
   useEffect(() => {
-    const L = leafletRef.current, layer = layerRef.current;
-    if (!mapReady || !L || !layer || !data) return;
+    const L = leafletRef.current, layer = layerRef.current, map = mapRef.current;
+    if (!mapReady || !L || !layer || !map || !data) return;
     layer.clearLayers();
-    if (filters.advice) {
-      const best = new Map<string, StandbyAdvice>();
-      for (const a of data.advice) if (!best.get(a.standby.id) || (best.get(a.standby.id)?.score ?? -1) < a.score) best.set(a.standby.id, a);
-      for (const a of best.values()) {
-        const icon = L.divIcon({ className: "standby-div-icon", html: `<span class="standby-pin standby-pin--${tone(a.score)}">${a.score}</span>`, iconSize: [38, 38], iconAnchor: [19, 19] });
-        const m = L.marker([a.standby.lat, a.standby.lng], { icon, zIndexOffset: 300 });
-        m.bindPopup(`<div class="radar-popup"><strong>${esc(a.standby.name)}</strong><br>${esc(a.standby.address)}<br>${esc(locationSource(a))}<hr><strong>${esc(a.segmentName)}</strong><br>${speedLabel(a.averageSpeedKph)} · ${flowLabel(a.flowVehiclesPerHour)}<br>Score ${a.score}/100 · zekerheid ${esc(a.confidence)}</div>`);
-        m.on("click", () => setSelectedId(a.id)); m.addTo(layer);
+
+    const scopeBounds: Array<[number, number]> = [];
+    if (filters.rayons) {
+      for (const roadSection of data.rayons.roadOverlays) {
+        if (roadSection.coordinates.length < 2) continue;
+        scopeBounds.push(...roadSection.coordinates);
+        const line = L.polyline(roadSection.coordinates, {
+          weight: 5,
+          opacity: .72,
+          color: "#243c63",
+          interactive: true,
+        });
+        line.bindTooltip(
+          `<strong>${esc(roadSection.rayon)}</strong> · ${esc(roadSection.road)} ${esc(roadSection.direction ?? "")}` +
+          `<br>km ${roadSection.fromKm.toFixed(1)}–${roadSection.toKm.toFixed(1)}`,
+          { sticky: true, direction: "top" },
+        );
+        line.bindPopup(
+          `<div class="radar-popup"><strong>${esc(roadSection.rayon)}</strong><br>` +
+          `${esc(roadSection.road)} ${esc(roadSection.direction ?? "beide richtingen")} · km ${roadSection.fromKm.toFixed(1)}–${roadSection.toKm.toFixed(1)}` +
+          `<hr>Officieel Van Eijck IM-wegvak volgens Stichting IMN.</div>`,
+        );
+        line.addTo(layer);
       }
     }
-    for (const e of data.events) {
-      if (!allow(e.kind, filters)) continue;
-      const m = L.circleMarker([e.lat, e.lng], { radius: e.kind === "accident" ? 8 : 6, weight: 2, color: "#fff", fillColor: colors[e.kind], fillOpacity: .92 });
-      m.bindPopup(`<div class="radar-popup"><strong>${esc(e.title)}</strong><br>${esc(e.roadRef ?? "NDW-locatie")}<br>Bron ${esc(e.source ?? "NDW")} · ${esc(clock(e.updatedAt))}</div>`); m.addTo(layer);
+
+    if (!fittedRayons.current && scopeBounds.length) {
+      map.fitBounds(scopeBounds, { padding: [34, 34], maxZoom: 9 });
+      fittedRayons.current = true;
+    }
+
+    if (filters.advice) {
+      const best = new Map<string, StandbyAdvice>();
+      for (const a of data.advice) {
+        if (!best.get(a.standby.id) || (best.get(a.standby.id)?.score ?? -1) < a.score) best.set(a.standby.id, a);
+      }
+      for (const a of best.values()) {
+        const icon = L.divIcon({
+          className: "standby-div-icon",
+          html: `<span class="standby-pin standby-pin--${tone(a.score)}">${a.score}</span>`,
+          iconSize: [38, 38],
+          iconAnchor: [19, 19],
+        });
+        const marker = L.marker([a.standby.lat, a.standby.lng], { icon, zIndexOffset: 300 });
+        marker.bindPopup(
+          `<div class="radar-popup"><strong>${esc(a.standby.name)}</strong><br>${esc(a.standby.address)}<br>${esc(locationSource(a))}` +
+          `<hr><strong>${esc(a.segmentName)}</strong><br>${speedLabel(a.averageSpeedKph)} · ${flowLabel(a.flowVehiclesPerHour)}` +
+          `<br>Score ${a.score}/100 · zekerheid ${esc(a.confidence)}</div>`,
+        );
+        marker.on("click", () => setSelectedId(a.id));
+        marker.addTo(layer);
+      }
+    }
+
+    for (const event of data.events) {
+      if (!allow(event.kind, filters)) continue;
+      const marker = L.circleMarker([event.lat, event.lng], {
+        radius: event.kind === "accident" ? 8 : 6,
+        weight: 2,
+        color: "#fff",
+        fillColor: colors[event.kind],
+        fillOpacity: .92,
+      });
+      marker.bindPopup(
+        `<div class="radar-popup"><strong>${esc(event.title)}</strong><br>${esc(event.rayon ? `${event.rayon} · ${event.roadRef ?? "IM-weg"}` : event.roadRef ?? "NDW-locatie")}` +
+        `<br>Bron ${esc(event.source ?? "NDW")} · ${esc(clock(event.updatedAt))}</div>`,
+      );
+      marker.addTo(layer);
     }
   }, [mapReady, data, filters]);
 
   const selected = useMemo(() => data?.advice.find(a => a.id === selectedId) ?? data?.advice[0] ?? null, [data, selectedId]);
   const age = data ? Math.max(0, Math.floor((now - new Date(data.generatedAt).getTime()) / 1000)) : 0;
   const next = Math.max(0, (data?.refreshAfterSeconds ?? 30) - age);
-  const focus = (a: StandbyAdvice) => { setSelectedId(a.id); mapRef.current?.setView([a.standby.lat, a.standby.lng], 13, { animate: true }); };
+  const focus = (a: StandbyAdvice) => {
+    setSelectedId(a.id);
+    mapRef.current?.setView([a.standby.lat, a.standby.lng], 13, { animate: true });
+  };
 
   return <main className="app-shell">
     <header className="topbar">
-      <div className="brand"><span className="brand-mark"><span /></span><div><strong>STANDBY RADAR</strong><small>Realtime analyse per 5-km snelwegsegment</small></div></div>
-      <div className="topbar-right"><span className="scope">NOORD-BRABANT + GELDERLAND</span><span className="update">{data ? `live ${clock(data.generatedAt)} · ${next}s` : "verbinden…"}</span><button disabled={refreshing} onClick={() => void load(true)}>{refreshing ? "VERVERSEN…" : "NU VERVERSEN"}</button></div>
+      <div className="brand"><span className="brand-mark"><span /></span><div><strong>STANDBY RADAR</strong><small>Realtime analyse uitsluitend binnen gecontracteerde IM-wegvakken</small></div></div>
+      <div className="topbar-right"><span className="scope">VAN EIJCK IM-RAYONS</span><span className="update">{data ? `live ${clock(data.generatedAt)} · ${next}s` : "verbinden…"}</span><button disabled={refreshing} onClick={() => void load(true)}>{refreshing ? "VERVERSEN…" : "NU VERVERSEN"}</button></div>
     </header>
+
     <section className="workspace">
       <div className="map-panel">
         <div ref={mapEl} className="map" aria-label="Standby Radar kaart" />
         {loading && <div className="loading-card">LIVE BRONNEN LADEN…</div>}
+
         <div className="map-hud"><div className="stats">
-          <Stat label="5-km segmenten" value={data?.meta.segmentCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} /><Stat label="Matrixacties" value={data?.matrix.activeSignals} />
+          <Stat label="IM-rayons" value={data?.meta.rayonCount} />
+          <Stat label="5-km segmenten" value={data?.meta.segmentCount} />
+          <Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} />
+          <Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} />
         </div><div className="filters">
+          <Filter label="IM-rayons" active={filters.rayons} onClick={() => setFilters(f => ({ ...f, rayons: !f.rayons }))} />
           <Filter label="Verkeer" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
           <Filter label="Incidenten" active={filters.incidents} onClick={() => setFilters(f => ({ ...f, incidents: !f.incidents }))} />
           <Filter label="Werkzaamheden" active={filters.works} onClick={() => setFilters(f => ({ ...f, works: !f.works }))} />
           <Filter label="Stand-by" active={filters.advice} onClick={() => setFilters(f => ({ ...f, advice: !f.advice }))} />
         </div></div>
-        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Automatisch gekozen stand-byplek</span></div>
+
+        <div className="legend">
+          <span><i className="rayon-line" /> Van Eijck IM-wegvak</span>
+          <span><i className="dot accident" /> Ongeval</span>
+          <span><i className="dot obstruction" /> Obstakel</span>
+          <span><i className="dot traffic" /> File</span>
+          <span><i className="ring" /> Automatisch gekozen stand-byplek</span>
+        </div>
       </div>
+
       <aside className="sidebar"><div className="side-scroll">
         {error && <div className="error-card">{error}</div>}
-        <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 8} online</span></div><div className="sources">{data?.sources.map(s => <span key={s.id} className={s.ok ? "source source--ok" : "source"} title={`${s.lineage ?? ""}${s.updatedAt ? ` · ${clock(s.updatedAt)}` : ""}${s.error ? ` · ${s.error}` : ""}`}>{s.name}</span>)}</div></section>
+
+        <section className="block">
+          <div className="block-title"><strong>IM-SCOPE</strong><span>{data?.meta.rayonCount ?? 0} rayons</span></div>
+          <div className="sources">
+            {data?.rayons.codes.map(code => <span key={code} className="source source--ok">{code}</span>)}
+          </div>
+        </section>
+
+        <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 9} online</span></div><div className="sources">{data?.sources.map(s => <span key={s.id} className={s.ok ? "source source--ok" : "source"} title={`${s.lineage ?? ""}${s.updatedAt ? ` · ${clock(s.updatedAt)}` : ""}${s.error ? ` · ${s.error}` : ""}`}>{s.name}</span>)}</div></section>
+
         <section className="block"><div className="block-title"><strong>LIVE STAND-BYADVIES</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
           {data?.advice.slice(0, 12).map((a, i) => <button key={a.id} className={`advice-card ${selected?.id === a.id ? "advice-card--selected" : ""}`} onClick={() => focus(a)}>
             <span className={`score score--${tone(a.score)}`}>{a.score}</span><span className="advice-copy"><strong>{i + 1}. {a.segmentName}<em>{a.recommendedUnits}×</em></strong><small>→ {a.standby.name} · {locationSource(a)}</small><span>{speedLabel(a.averageSpeedKph)} · {flowLabel(a.flowVehiclesPerHour)} · {a.sensorCount} meetpunt(en)</span><small>{a.standby.address}</small></span>
           </button>)}
           {!loading && data && data.advice.length === 0 && <div className="error-card">Geen stand-byadviezen ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
         </div></section>
+
         {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{selected.segmentName}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
-          <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Incidenten lokaal" value={selected.localEvents} /></div>
-          <ul>{selected.reasons.map(r => <li key={r}>{r}</li>)}</ul><p>{selected.standby.source === "rws" ? "Dit is een officiële RWS-locatie. De engine koos hem automatisch vanwege de actuele druk in het bijbehorende segment." : "Dit is een automatisch gevonden OSM-kandidaat nabij dezelfde A-weg. De plek moet operationeel geschikt en legaal toegankelijk blijven; bij twijfel heeft een officiële RWS-locatie voorrang."}</p>
+          <div className="why-grid">
+            <Metric label="Rayon" value={selected.rayon} />
+            <Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} />
+            <Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} />
+            <Metric label="Meetpunten" value={selected.sensorCount} />
+            <Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} />
+            <Metric label="Matrix lokaal" value={selected.matrixClusters} />
+          </div>
+          <ul>{selected.reasons.map(r => <li key={r}>{r}</li>)}</ul>
+          <p>{selected.standby.source === "rws" ? "Dit is een officiële RWS-locatie binnen hetzelfde IM-rayon. De engine koos hem pas nadat de actuele verkeersdruk van het wegvak was bepaald." : "Dit is een aanvullende OSM-kandidaat binnen hetzelfde IM-rayon. De plek moet operationeel geschikt en legaal toegankelijk blijven; officiële RWS-locaties krijgen voorrang."}</p>
         </section>}
-        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>{data?.meta.note ?? "Live analyse wordt geladen."}</p></div>
+
+        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>{data?.meta.note ?? "Live analyse wordt geladen."}</p><p>De getekende lijnen zijn de contractuele IM-wegvakken. Dit zijn niet de OWN-gebiedspolygonen uit de overzichtskaart.</p></div>
       </div></aside>
     </section>
   </main>;
