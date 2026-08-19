@@ -12,6 +12,7 @@ Zelfstandige realtime verkeerskaart voor operationele stand-by advisering van be
 - Experimentele stand-by score per corridor
 - Uitleg waarom een corridor hoog of laag scoort
 - Geen betaalde API-key nodig
+- GitHub Actions controleert automatisch of de productie-build slaagt
 
 ## Lokaal draaien
 
