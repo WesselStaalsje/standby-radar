@@ -20,13 +20,16 @@ export async function GET() {
   const key = process.env.TOMTOM_API_KEY?.trim();
   if (!key) return NextResponse.json({ configured: false });
 
-  const classic = `https://api.tomtom.com/traffic/map/4/tile/flow/relative/9/263/170.pbf?key=${encodeURIComponent(key)}`;
-  const orbis = `https://api.tomtom.com/maps/orbis/traffic/tile/flow/9/263/170.pbf?apiVersion=1&key=${encodeURIComponent(key)}`;
+  const encodedKey = encodeURIComponent(key);
+  const classic = `https://api.tomtom.com/traffic/map/4/tile/flow/relative/9/263/170.pbf?key=${encodedKey}`;
+  const orbis = `https://api.tomtom.com/maps/orbis/traffic/tile/flow/9/263/170.pbf?apiVersion=1&key=${encodedKey}`;
+  const routing = `https://api.tomtom.com/routing/1/calculateRoute/51.4416,5.4697:51.4816,5.6616/json?traffic=true&key=${encodedKey}`;
 
-  const [classicResult, orbisResult] = await Promise.all([
+  const [classicResult, orbisResult, routingResult] = await Promise.all([
     probe("classic-traffic-flow", classic),
     probe("orbis-traffic-flow", orbis),
+    probe("routing", routing),
   ]);
 
-  return NextResponse.json({ configured: true, probes: [classicResult, orbisResult] }, { headers: { "cache-control": "no-store" } });
+  return NextResponse.json({ configured: true, keyLength: key.length, probes: [classicResult, orbisResult, routingResult] }, { headers: { "cache-control": "no-store" } });
 }
