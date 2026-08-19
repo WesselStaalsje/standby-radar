@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayerGroup, Map as LeafletMap } from "leaflet";
 import type { LiveRadarData, StandbyAdvice, TrafficKind } from "@/lib/types";
+import { RAYON_OVERLAY_BOUNDS, RAYON_OVERLAY_DATA_URI } from "@/lib/rayon-visual";
 
 type Filters = { rayons: boolean; traffic: boolean; incidents: boolean; works: boolean; advice: boolean };
 
@@ -47,19 +48,16 @@ export function RadarDashboard() {
     try {
       let payload = await fetchPayload();
       const shouldHaveAdvice = payload.meta.segmentCount > 0 && payload.meta.candidateLocationCount > 0;
-
       if (shouldHaveAdvice && payload.advice.length === 0) {
         await new Promise(resolve => window.setTimeout(resolve, 900));
         if (seq !== requestSeq.current) return;
         payload = await fetchPayload();
       }
-
       if (seq !== requestSeq.current) return;
 
       if (payload.advice.length) lastGoodAdvice.current = payload.advice;
       const effectiveAdvice = payload.advice.length ? payload.advice : lastGoodAdvice.current;
       const effectivePayload = effectiveAdvice === payload.advice ? payload : { ...payload, advice: effectiveAdvice };
-
       setData(effectivePayload);
       setSelectedId(current => current && effectiveAdvice.some(a => a.id === current) ? current : effectiveAdvice[0]?.id ?? null);
 
@@ -89,15 +87,23 @@ export function RadarDashboard() {
     let dead = false;
     void (async () => {
       if (!mapEl.current || mapRef.current) return;
-      const L = await import("leaflet"); if (dead || !mapEl.current) return;
+      const L = await import("leaflet");
+      if (dead || !mapEl.current) return;
       leafletRef.current = L;
       const map = L.map(mapEl.current, { center: [51.75, 5.45], zoom: 8, zoomControl: false, preferCanvas: true });
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
+      map.createPane("rayonPane");
+      const rayonPane = map.getPane("rayonPane");
+      if (rayonPane) {
+        rayonPane.style.zIndex = "350";
+        rayonPane.style.pointerEvents = "none";
+      }
       L.control.zoom({ position: "bottomright" }).addTo(map);
       L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
       layerRef.current = L.layerGroup().addTo(map);
-      map.fitBounds([[51.2, 4.2], [52.3, 6.55]], { padding: [20, 20] });
+      map.fitBounds(RAYON_OVERLAY_BOUNDS, { padding: [20, 20], maxZoom: 9 });
       mapRef.current = map;
+      fittedRayons.current = true;
       setMapReady(true);
       setTimeout(() => map.invalidateSize(), 60);
     })();
@@ -116,34 +122,16 @@ export function RadarDashboard() {
     if (!mapReady || !L || !layer || !map || !data) return;
     layer.clearLayers();
 
-    const scopeBounds: Array<[number, number]> = [];
     if (filters.rayons) {
-      for (const roadSection of data.rayons.roadOverlays) {
-        if (roadSection.coordinates.length < 2) continue;
-        scopeBounds.push(...roadSection.coordinates);
-        const line = L.polyline(roadSection.coordinates, {
-          weight: 5,
-          opacity: .72,
-          color: "#243c63",
-          interactive: true,
-        });
-        line.bindTooltip(
-          `<strong>${esc(roadSection.rayon)}</strong> · ${esc(roadSection.road)} ${esc(roadSection.direction ?? "")}` +
-          `<br>km ${roadSection.fromKm.toFixed(1)}–${roadSection.toKm.toFixed(1)}`,
-          { sticky: true, direction: "top" },
-        );
-        line.bindPopup(
-          `<div class="radar-popup"><strong>${esc(roadSection.rayon)}</strong><br>` +
-          `${esc(roadSection.road)} ${esc(roadSection.direction ?? "beide richtingen")} · km ${roadSection.fromKm.toFixed(1)}–${roadSection.toKm.toFixed(1)}` +
-          `<hr>Officieel Van Eijck IM-wegvak volgens Stichting IMN.</div>`,
-        );
-        line.addTo(layer);
+      L.imageOverlay(RAYON_OVERLAY_DATA_URI, RAYON_OVERLAY_BOUNDS, {
+        opacity: .9,
+        interactive: false,
+        pane: "rayonPane",
+      }).addTo(layer);
+      if (!fittedRayons.current) {
+        map.fitBounds(RAYON_OVERLAY_BOUNDS, { padding: [28, 28], maxZoom: 9 });
+        fittedRayons.current = true;
       }
-    }
-
-    if (!fittedRayons.current && scopeBounds.length) {
-      map.fitBounds(scopeBounds, { padding: [34, 34], maxZoom: 9 });
-      fittedRayons.current = true;
     }
 
     if (filters.advice) {
@@ -211,7 +199,7 @@ export function RadarDashboard() {
           <Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} />
           <Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} />
         </div><div className="filters">
-          <Filter label="IM-rayons" active={filters.rayons} onClick={() => setFilters(f => ({ ...f, rayons: !f.rayons }))} />
+          <Filter label="Rayons" active={filters.rayons} onClick={() => setFilters(f => ({ ...f, rayons: !f.rayons }))} />
           <Filter label="Verkeer" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
           <Filter label="Incidenten" active={filters.incidents} onClick={() => setFilters(f => ({ ...f, incidents: !f.incidents }))} />
           <Filter label="Werkzaamheden" active={filters.works} onClick={() => setFilters(f => ({ ...f, works: !f.works }))} />
@@ -219,7 +207,7 @@ export function RadarDashboard() {
         </div></div>
 
         <div className="legend">
-          <span><i className="rayon-line" /> Van Eijck IM-wegvak</span>
+          <span><i className="rayon-line" /> IMN rayonindeling</span>
           <span><i className="dot accident" /> Ongeval</span>
           <span><i className="dot obstruction" /> Obstakel</span>
           <span><i className="dot traffic" /> File</span>
@@ -259,7 +247,7 @@ export function RadarDashboard() {
           <p>{selected.standby.source === "rws" ? "Dit is een officiële RWS-locatie binnen hetzelfde IM-rayon. De engine koos hem pas nadat de actuele verkeersdruk van het wegvak was bepaald." : "Dit is een aanvullende OSM-kandidaat binnen hetzelfde IM-rayon. De plek moet operationeel geschikt en legaal toegankelijk blijven; officiële RWS-locaties krijgen voorrang."}</p>
         </section>}
 
-        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>{data?.meta.note ?? "Live analyse wordt geladen."}</p><p>De getekende lijnen zijn de contractuele IM-wegvakken. Dit zijn niet de OWN-gebiedspolygonen uit de overzichtskaart.</p></div>
+        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>{data?.meta.note ?? "Live analyse wordt geladen."}</p><p>De kaart toont de volledige rayonvormen en codes volgens de aangeleverde IMN/OWN-overzichtskaart. De live berekening zelf blijft gebaseerd op de actuele gecontracteerde IM-wegvakken, rijrichting en hectometergrenzen.</p></div>
       </div></aside>
     </section>
   </main>;
