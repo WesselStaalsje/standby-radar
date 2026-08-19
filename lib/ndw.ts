@@ -1,44 +1,407 @@
 import type { MatrixRoadSummary, TrafficEvent, TrafficKind } from "@/lib/types";
 
-export const TARGET_ROADS=new Set(["A1","A2","A12","A15","A16","A17","A18","A27","A28","A30","A50","A58","A59","A65","A67","A73"]);
-const REGION={minLat:51.15,maxLat:52.30,minLng:4.20,maxLng:6.55};
-export type MatrixSignal={signId:string;road:string|null;carriageway:string|null;lane:number|null;km:number|null;display:"speed"|"lane_closed"|"lane_closed_ahead"|"lane_open"|"restriction_end"|"blank"|"unknown";speedLimit:number|null};
-export type RawMeasurementSite={id:string;name:string;lat:number;lng:number;speedIndexes:Set<number>;flowIndexes:Set<number>};
-export type MeasurementSite=RawMeasurementSite&{road:string;km:number;direction:string|null;mappingDistanceMeters:number};
-export type RoadMetringPoint={road:string;km:number;lat:number;lng:number;direction:string|null};
-export type SiteTraffic={siteId:string;measuredAt:string;speedKph:number|null;flowVehiclesPerHour:number|null};
+export const TARGET_ROADS = new Set([
+  "A1", "A2", "A4", "A12", "A15", "A16", "A17", "A18", "A27", "A28", "A29", "A30",
+  "A50", "A58", "A59", "A65", "A67", "A73", "A270", "A325", "A326", "A348", "A783",
+]);
+const REGION = { minLat: 51.15, maxLat: 52.30, minLng: 4.20, maxLng: 6.55 };
 
-type SiteConfig=Pick<RawMeasurementSite,"id"|"speedIndexes"|"flowIndexes">;
-const decode=(s:string)=>s.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'");
-export const stripTags=(s:string)=>decode(s.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
-export const tagValue=(xml:string,tag:string)=>new RegExp(`<(?:(?:[A-Za-z0-9_-]+):)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:(?:[A-Za-z0-9_-]+):)?${tag}>`,"i").exec(xml)?.[1]??null;
-const hasTag=(xml:string,tag:string)=>new RegExp(`<(?:(?:[A-Za-z0-9_-]+):)?${tag}\\b`,"i").test(xml);
-const attr=(s:string,name:string)=>new RegExp(`(?:^|\\s)${name}="([^"]+)"`,"i").exec(s)?.[1]??null;
-const numberTag=(xml:string,tag:string)=>{const raw=tagValue(xml,tag);if(raw===null)return null;const n=Number(stripTags(raw).replace(",","."));return Number.isFinite(n)?n:null;};
-const median=(v:number[])=>{if(!v.length)return null;const a=[...v].sort((x,y)=>x-y),m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;};
-const round1=(n:number)=>Math.round(n*10)/10;
-const inRegion=(lat:number,lng:number)=>lat>=REGION.minLat&&lat<=REGION.maxLat&&lng>=REGION.minLng&&lng<=REGION.maxLng;
-const coords=(body:string)=>{const src=tagValue(body,"coordinatesForDisplay")??tagValue(body,"locationForDisplay")??tagValue(body,"pointCoordinates")??body,lat=numberTag(src,"latitude"),lng=numberTag(src,"longitude");return lat!==null&&lng!==null&&inRegion(lat,lng)?{lat,lng}:null;};
-const roadRef=(body:string)=>{for(const t of ["roadNumber","roadName","roadNameAtOrigin","roadNameAtDestination"]){const raw=tagValue(body,t);if(!raw)continue;const m=/\b(?:A|N)\s?\d{1,3}\b/i.exec(stripTags(raw));if(m)return m[0].replace(/\s/g,"").toUpperCase();}return null;};
-const sourceName=(body:string)=>{const src=tagValue(body,"source"),v=src?tagValue(src,"value"):null;return v?stripTags(v).slice(0,80):null;};
-const haversineM=(a:{lat:number;lng:number},b:{lat:number;lng:number})=>{const r=(n:number)=>n*Math.PI/180,dLat=r(b.lat-a.lat),dLng=r(b.lng-a.lng),x=Math.sin(dLat/2)**2+Math.cos(r(a.lat))*Math.cos(r(b.lat))*Math.sin(dLng/2)**2;return 6371000*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));};
-const normalizeRoad=(value:unknown)=>{const m=/^A\s*0*(\d{1,3})$/i.exec(String(value??"").trim());return m?`A${Number(m[1])}`:null;};
+export type MatrixSignal = {
+  signId: string;
+  road: string | null;
+  carriageway: string | null;
+  lane: number | null;
+  km: number | null;
+  display: "speed" | "lane_closed" | "lane_closed_ahead" | "lane_open" | "restriction_end" | "blank" | "unknown";
+  speedLimit: number | null;
+};
 
-const classify=(type:string,body:string):TrafficKind|null=>{const v=type.toLowerCase();if(v.includes("abnormaltraffic"))return"traffic";if(v.includes("accident"))return"accident";if(v.includes("vehicleobstruction")||v.includes("generalobstruction")||v.includes("animalpresence"))return"obstruction";if(v.includes("maintenanceworks")||v.includes("constructionworks"))return"works";if(v.includes("poorenvironment")||v.includes("weatherrelatedroad"))return"weather";if(v.includes("roadorcarriagewayorlanemanagement")&&/closed|closure|blocked|laneClos|roadClos/i.test(body))return"closure";return null;};
-const title=(kind:TrafficKind,body:string)=>{if(kind==="traffic"){const t=stripTags(tagValue(body,"abnormalTrafficType")??"");if(t==="stationaryTraffic")return"Stilstaand verkeer";if(t==="queuingTraffic")return"File";if(t==="slowTraffic")return"Langzaam verkeer";return"Afwijkend verkeersbeeld";}if(kind==="accident")return"Ongeval";if(kind==="obstruction")return"Obstakel / voertuig op de weg";if(kind==="closure")return"Afsluiting / rijstrookbeperking";if(kind==="works")return"Wegwerkzaamheden";return"Weers- of wegdekbelemmering";};
-const fresh=(kind:TrafficKind,s:string|null)=>{if(!s)return kind==="works"||kind==="closure";const t=Date.parse(s);if(!Number.isFinite(t))return false;const age=Math.max(0,(Date.now()-t)/60000);return age<=(kind==="works"||kind==="closure"?1440:180);};
+export type RawMeasurementSite = {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  speedIndexes: Set<number>;
+  flowIndexes: Set<number>;
+};
 
-export function parseEvents(xml:string):TrafficEvent[]{const out:TrafficEvent[]=[];const rx=/<(?:(?:[A-Za-z0-9_-]+):)?situationRecord\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?situationRecord>/gi;let m:RegExpExecArray|null;while((m=rx.exec(xml))){const attrs=m[1],body=m[2],raw=attr(attrs,"xsi:type")??attr(attrs,"type")??"SituationRecord",type=raw.split(":").pop()??raw,kind=classify(type,body),c=coords(body);if(!kind||!c)continue;const u=tagValue(body,"situationRecordVersionTime")??tagValue(body,"situationRecordCreationTime"),updatedAt=u?stripTags(u):null;if(!fresh(kind,updatedAt))continue;out.push({id:attr(attrs,"id")??`ndw-${out.length+1}`,kind,title:title(kind,body),type,lat:c.lat,lng:c.lng,roadRef:roadRef(body),queueLengthMeters:numberTag(body,"queueLength"),source:sourceName(body)??"NDW",updatedAt});}return out.slice(0,500);}
+export type MeasurementSite = RawMeasurementSite & {
+  road: string;
+  km: number;
+  direction: string | null;
+  mappingDistanceMeters: number;
+  wvkId?: number | null;
+};
 
-export function parseMatrix(xml:string):MatrixSignal[]{const map=new Map<string,MatrixSignal>(),rx=/<(?:(?:[A-Za-z0-9_-]+):)?event\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?event>/gi;let m:RegExpExecArray|null;while((m=rx.exec(xml))){const attrs=m[1],body=m[2],id=stripTags(tagValue(body,"sign_id")??attr(attrs,"sign_id")??"");if(!id)continue;const x=map.get(id)??{signId:id,road:null,carriageway:null,lane:null,km:null,display:"unknown" as const,speedLimit:null},r=tagValue(body,"road"),cw=tagValue(body,"carriageway");if(r)x.road=normalizeRoad(stripTags(r));if(cw)x.carriageway=stripTags(cw);x.lane=numberTag(body,"lane")??x.lane;x.km=numberTag(body,"km")??x.km;const speed=numberTag(body,"speedlimit");if(speed!==null){x.display="speed";x.speedLimit=speed;}else if(hasTag(body,"lane_closed_ahead"))x.display="lane_closed_ahead";else if(hasTag(body,"lane_closed"))x.display="lane_closed";else if(hasTag(body,"lane_open"))x.display="lane_open";else if(hasTag(body,"restriction_end"))x.display="restriction_end";else if(hasTag(body,"blank"))x.display="blank";map.set(id,x);}return[...map.values()].filter(x=>TARGET_ROADS.has(x.road??""));}
+export type RoadMetringPoint = {
+  road: string;
+  km: number;
+  lat: number;
+  lng: number;
+  direction: string | null;
+  wvkId: number | null;
+};
 
-export function parseRawMeasurementSites(xml:string):RawMeasurementSite[]{const out:RawMeasurementSite[]=[],rx=/<(?:(?:[A-Za-z0-9_-]+):)?measurementSiteRecord\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measurementSiteRecord>/gi;let m:RegExpExecArray|null;while((m=rx.exec(xml))){const id=attr(m[1],"id"),body=m[2],c=coords(tagValue(body,"measurementSiteLocation")??body);if(!id||!c)continue;const name=stripTags(tagValue(body,"measurementSiteName")??""),speedIndexes=new Set<number>(),flowIndexes=new Set<number>(),crx=/<(?:(?:[A-Za-z0-9_-]+):)?measurementSpecificCharacteristics\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measurementSpecificCharacteristics>/gi;let q:RegExpExecArray|null;while((q=crx.exec(body))){const idx=Number(attr(q[1],"index"));if(!Number.isInteger(idx))continue;const inner=q[2],anyVehicle=/<(?:(?:[A-Za-z0-9_-]+):)?vehicleType\b[^>]*>\s*anyVehicle\s*<\//i.test(inner);if(!anyVehicle)continue;const t=stripTags(tagValue(inner,"specificMeasurementValueType")??"");if(t==="trafficSpeed")speedIndexes.add(idx);if(t==="trafficFlow")flowIndexes.add(idx);}if(speedIndexes.size||flowIndexes.size)out.push({id,name,lat:c.lat,lng:c.lng,speedIndexes,flowIndexes});}return out;}
+export type SiteTraffic = {
+  siteId: string;
+  measuredAt: string;
+  speedKph: number | null;
+  flowVehiclesPerHour: number | null;
+  qualityScore?: number | null;
+  inputValues?: number | null;
+  incompleteInputs?: number | null;
+};
 
-export function parseRoadMetringPoints(payload:unknown):RoadMetringPoint[]{const features=(payload as{features?:Array<{geometry?:{coordinates?:unknown};properties?:Record<string,unknown>}>})?.features??[],out:RoadMetringPoint[]=[];for(const f of features){const p=f.properties??{},road=normalizeRoad(p.a_n_nr),xy=f.geometry?.coordinates;if(!road||!TARGET_ROADS.has(road)||!Array.isArray(xy)||typeof xy[0]!=="number"||typeof xy[1]!=="number")continue;const lng=xy[0],lat=xy[1];if(!inRegion(lat,lng))continue;const direct=Number(String(p.hectometer??"").replace(",",".")),raw=Number(p.hectomtrng),km=Number.isFinite(direct)?direct:Number.isFinite(raw)?raw/10:NaN;if(!Number.isFinite(km))continue;out.push({road,km,lat,lng,direction:typeof p.l_r==="string"?p.l_r:null});}return out;}
+type SiteConfig = Pick<RawMeasurementSite, "id" | "speedIndexes" | "flowIndexes">;
 
-export function mapMeasurementSites(raw:RawMeasurementSite[],points:RoadMetringPoint[]):MeasurementSite[]{const cell=.01,key=(lat:number,lng:number)=>`${Math.floor(lat/cell)}:${Math.floor(lng/cell)}`,grid=new Map<string,RoadMetringPoint[]>();for(const p of points){const k=key(p.lat,p.lng),g=grid.get(k)??[];g.push(p);grid.set(k,g);}const out:MeasurementSite[]=[];for(const s of raw){const explicit=/\b([AN])\s*0*(\d{1,3})\b/i.exec(s.name),explicitRoad=explicit?`${explicit[1].toUpperCase()}${Number(explicit[2])}`:null;if(explicitRoad?.startsWith("N"))continue;const iy=Math.floor(s.lat/cell),ix=Math.floor(s.lng/cell),candidates:Array<{p:RoadMetringPoint;d:number}>=[];for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)for(const p of grid.get(`${iy+dy}:${ix+dx}`)??[]){if(explicitRoad&&p.road!==explicitRoad)continue;const d=haversineM(s,p);if(d<=180)candidates.push({p,d});}candidates.sort((a,b)=>a.d-b.d);const best=candidates[0];if(!best)continue;const competing=candidates.find(x=>x.p.road!==best.p.road);if(competing&&competing.d<=220&&competing.d-best.d<45)continue;out.push({...s,road:best.p.road,km:best.p.km,direction:best.p.direction,mappingDistanceMeters:Math.round(best.d)});}return out;}
+const decode = (value: string) => value
+  .replace(/&amp;/g, "&")
+  .replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;|&apos;/g, "'");
 
-export function parseTrafficSamples(xml:string,siteMap:Map<string,SiteConfig>):SiteTraffic[]{const out:SiteTraffic[]=[],rx=/<(?:(?:[A-Za-z0-9_-]+):)?siteMeasurements\b[^>]*>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?siteMeasurements>/gi;let m:RegExpExecArray|null;while((m=rx.exec(xml))){const body=m[1],ref=/<(?:(?:[A-Za-z0-9_-]+):)?measurementSiteReference\b([^>]*)\/?\s*>/i.exec(body),id=ref?attr(ref[1],"id"):null;if(!id)continue;const cfg=siteMap.get(id);if(!cfg)continue;const mt=tagValue(body,"measurementTimeDefault")??"",measuredAt=stripTags(tagValue(mt,"timeValue")??mt),tm=Date.parse(measuredAt);if(!Number.isFinite(tm)||Math.abs(Date.now()-tm)>240000)continue;const speeds:number[]=[],flows:number[]=[],qrx=/<(?:(?:[A-Za-z0-9_-]+):)?measuredValue\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measuredValue>/gi;let q:RegExpExecArray|null;while((q=qrx.exec(body))){const idx=Number(attr(q[1],"index")),b=q[2];if(!Number.isInteger(idx)||/dataError[^>]*>\s*true\s*</i.test(b))continue;if(cfg.speedIndexes.has(idx)){const s=numberTag(b,"speed");if(s!==null&&s>=0&&s<=200&&s!==256)speeds.push(s);}if(cfg.flowIndexes.has(idx)){const f=numberTag(b,"vehicleFlowRate");if(f!==null&&f>=0&&f<=10000)flows.push(f);}}let speed=median(speeds);const flow=flows.length?flows.reduce((a,b)=>a+b,0):null;if(speeds.length&&flows.length===speeds.length){const total=flows.reduce((a,b)=>a+b,0);if(total>0)speed=speeds.reduce((sum,s,i)=>sum+s*flows[i],0)/total;}if(speed!==null||flow!==null)out.push({siteId:id,measuredAt,speedKph:speed===null?null:round1(speed),flowVehiclesPerHour:flow});}return out;}
+export const stripTags = (value: string) => decode(value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+export const tagValue = (xml: string, tag: string) => new RegExp(`<(?:(?:[A-Za-z0-9_-]+):)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:(?:[A-Za-z0-9_-]+):)?${tag}>`, "i").exec(xml)?.[1] ?? null;
+const hasTag = (xml: string, tag: string) => new RegExp(`<(?:(?:[A-Za-z0-9_-]+):)?${tag}\\b`, "i").test(xml);
+const attr = (text: string, name: string) => new RegExp(`(?:^|\\s)${name}="([^"]+)"`, "i").exec(text)?.[1] ?? null;
+const numberTag = (xml: string, tag: string) => {
+  const raw = tagValue(xml, tag);
+  if (raw === null) return null;
+  const value = Number(stripTags(raw).replace(",", "."));
+  return Number.isFinite(value) ? value : null;
+};
+const median = (values: number[]) => {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+const round1 = (value: number) => Math.round(value * 10) / 10;
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const inRegion = (lat: number, lng: number) => lat >= REGION.minLat && lat <= REGION.maxLat && lng >= REGION.minLng && lng <= REGION.maxLng;
+const coords = (body: string) => {
+  const source = tagValue(body, "coordinatesForDisplay") ?? tagValue(body, "locationForDisplay") ?? tagValue(body, "pointCoordinates") ?? body;
+  const lat = numberTag(source, "latitude");
+  const lng = numberTag(source, "longitude");
+  return lat !== null && lng !== null && inRegion(lat, lng) ? { lat, lng } : null;
+};
+const roadRef = (body: string) => {
+  for (const tag of ["roadNumber", "roadName", "roadNameAtOrigin", "roadNameAtDestination"]) {
+    const raw = tagValue(body, tag);
+    if (!raw) continue;
+    const match = /\b(?:A|N)\s?\d{1,3}\b/i.exec(stripTags(raw));
+    if (match) return match[0].replace(/\s/g, "").toUpperCase();
+  }
+  return null;
+};
+const sourceName = (body: string) => {
+  const source = tagValue(body, "source");
+  const value = source ? tagValue(source, "value") : null;
+  return value ? stripTags(value).slice(0, 80) : null;
+};
+const haversineM = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+  const rad = (value: number) => value * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLng = rad(b.lng - a.lng);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+};
+const normalizeRoad = (value: unknown) => {
+  const match = /^A\s*0*(\d{1,3})$/i.exec(String(value ?? "").trim());
+  return match ? `A${Number(match[1])}` : null;
+};
 
-export const isActiveMatrix=(s:MatrixSignal)=>s.display==="lane_closed"||s.display==="lane_closed_ahead"||(s.display==="speed"&&(s.speedLimit??999)<=90);
-export function matrixSummary(signals:MatrixSignal[]):MatrixRoadSummary[]{const map=new Map<string,MatrixRoadSummary>();for(const s of signals.filter(isActiveMatrix)){if(!s.road)continue;const x=map.get(s.road)??{road:s.road,active:0,closures:0,lowSpeed:0};x.active++;if(s.display==="lane_closed"||s.display==="lane_closed_ahead")x.closures++;if(s.display==="speed"&&(s.speedLimit??999)<=70)x.lowSpeed++;map.set(s.road,x);}return[...map.values()].sort((a,b)=>b.closures-a.closures||b.lowSpeed-a.lowSpeed||b.active-a.active).slice(0,30);}
+const classify = (type: string, body: string): TrafficKind | null => {
+  const value = type.toLowerCase();
+  if (value.includes("abnormaltraffic")) return "traffic";
+  if (value.includes("accident")) return "accident";
+  if (value.includes("vehicleobstruction") || value.includes("generalobstruction") || value.includes("animalpresence")) return "obstruction";
+  if (value.includes("maintenanceworks") || value.includes("constructionworks")) return "works";
+  if (value.includes("poorenvironment") || value.includes("weatherrelatedroad")) return "weather";
+  if (value.includes("roadorcarriagewayorlanemanagement") && /closed|closure|blocked|laneClos|roadClos/i.test(body)) return "closure";
+  return null;
+};
+
+const title = (kind: TrafficKind, body: string) => {
+  if (kind === "traffic") {
+    const trafficType = stripTags(tagValue(body, "abnormalTrafficType") ?? "");
+    if (trafficType === "stationaryTraffic") return "Stilstaand verkeer";
+    if (trafficType === "queuingTraffic") return "File";
+    if (trafficType === "slowTraffic") return "Langzaam verkeer";
+    return "Afwijkend verkeersbeeld";
+  }
+  if (kind === "accident") return "Ongeval";
+  if (kind === "obstruction") return "Obstakel / voertuig op de weg";
+  if (kind === "closure") return "Afsluiting / rijstrookbeperking";
+  if (kind === "works") return "Wegwerkzaamheden";
+  return "Weers- of wegdekbelemmering";
+};
+
+const fresh = (kind: TrafficKind, timestamp: string | null) => {
+  if (!timestamp) return kind === "works" || kind === "closure";
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return false;
+  const ageMinutes = Math.max(0, (Date.now() - parsed) / 60000);
+  return ageMinutes <= (kind === "works" || kind === "closure" ? 1440 : 180);
+};
+
+export function parseEvents(xml: string): TrafficEvent[] {
+  const out: TrafficEvent[] = [];
+  const regex = /<(?:(?:[A-Za-z0-9_-]+):)?situationRecord\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?situationRecord>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml))) {
+    const attrs = match[1];
+    const body = match[2];
+    const raw = attr(attrs, "xsi:type") ?? attr(attrs, "type") ?? "SituationRecord";
+    const type = raw.split(":").pop() ?? raw;
+    const kind = classify(type, body);
+    const location = coords(body);
+    if (!kind || !location) continue;
+    const updatedRaw = tagValue(body, "situationRecordVersionTime") ?? tagValue(body, "situationRecordCreationTime");
+    const updatedAt = updatedRaw ? stripTags(updatedRaw) : null;
+    if (!fresh(kind, updatedAt)) continue;
+    out.push({
+      id: attr(attrs, "id") ?? `ndw-${out.length + 1}`,
+      kind,
+      title: title(kind, body),
+      type,
+      lat: location.lat,
+      lng: location.lng,
+      roadRef: roadRef(body),
+      queueLengthMeters: numberTag(body, "queueLength"),
+      source: sourceName(body) ?? "NDW",
+      updatedAt,
+    });
+  }
+  return out.slice(0, 500);
+}
+
+export function parseMatrix(xml: string): MatrixSignal[] {
+  const map = new Map<string, MatrixSignal>();
+  const regex = /<(?:(?:[A-Za-z0-9_-]+):)?event\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?event>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml))) {
+    const attrs = match[1];
+    const body = match[2];
+    const id = stripTags(tagValue(body, "sign_id") ?? attr(attrs, "sign_id") ?? "");
+    if (!id) continue;
+    const current = map.get(id) ?? {
+      signId: id, road: null, carriageway: null, lane: null, km: null,
+      display: "unknown" as const, speedLimit: null,
+    };
+    const road = tagValue(body, "road");
+    const carriageway = tagValue(body, "carriageway");
+    if (road) current.road = normalizeRoad(stripTags(road));
+    if (carriageway) current.carriageway = stripTags(carriageway);
+    current.lane = numberTag(body, "lane") ?? current.lane;
+    current.km = numberTag(body, "km") ?? current.km;
+    const speed = numberTag(body, "speedlimit");
+    if (speed !== null) { current.display = "speed"; current.speedLimit = speed; }
+    else if (hasTag(body, "lane_closed_ahead")) current.display = "lane_closed_ahead";
+    else if (hasTag(body, "lane_closed")) current.display = "lane_closed";
+    else if (hasTag(body, "lane_open")) current.display = "lane_open";
+    else if (hasTag(body, "restriction_end")) current.display = "restriction_end";
+    else if (hasTag(body, "blank")) current.display = "blank";
+    map.set(id, current);
+  }
+  return [...map.values()].filter(item => TARGET_ROADS.has(item.road ?? ""));
+}
+
+export function parseRawMeasurementSites(xml: string): RawMeasurementSite[] {
+  const out: RawMeasurementSite[] = [];
+  const regex = /<(?:(?:[A-Za-z0-9_-]+):)?measurementSiteRecord\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measurementSiteRecord>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml))) {
+    const id = attr(match[1], "id");
+    const body = match[2];
+    const location = coords(tagValue(body, "measurementSiteLocation") ?? body);
+    if (!id || !location) continue;
+    const name = stripTags(tagValue(body, "measurementSiteName") ?? "");
+    const speedIndexes = new Set<number>();
+    const flowIndexes = new Set<number>();
+    const characteristics = /<(?:(?:[A-Za-z0-9_-]+):)?measurementSpecificCharacteristics\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measurementSpecificCharacteristics>/gi;
+    let characteristic: RegExpExecArray | null;
+    while ((characteristic = characteristics.exec(body))) {
+      const index = Number(attr(characteristic[1], "index"));
+      if (!Number.isInteger(index)) continue;
+      const inner = characteristic[2];
+      const anyVehicle = /<(?:(?:[A-Za-z0-9_-]+):)?vehicleType\b[^>]*>\s*anyVehicle\s*<\//i.test(inner);
+      if (!anyVehicle) continue;
+      const type = stripTags(tagValue(inner, "specificMeasurementValueType") ?? "");
+      if (type === "trafficSpeed") speedIndexes.add(index);
+      if (type === "trafficFlow") flowIndexes.add(index);
+    }
+    if (speedIndexes.size || flowIndexes.size) out.push({ id, name, lat: location.lat, lng: location.lng, speedIndexes, flowIndexes });
+  }
+  return out;
+}
+
+export function parseRoadMetringPoints(payload: unknown): RoadMetringPoint[] {
+  const features = (payload as { features?: Array<{ geometry?: { coordinates?: unknown }; properties?: Record<string, unknown> }> })?.features ?? [];
+  const out: RoadMetringPoint[] = [];
+  for (const feature of features) {
+    const properties = feature.properties ?? {};
+    const road = normalizeRoad(properties.a_n_nr);
+    const coordinates = feature.geometry?.coordinates;
+    if (!road || !TARGET_ROADS.has(road) || !Array.isArray(coordinates) || typeof coordinates[0] !== "number" || typeof coordinates[1] !== "number") continue;
+    const lng = coordinates[0];
+    const lat = coordinates[1];
+    if (!inRegion(lat, lng)) continue;
+    const direct = Number(String(properties.hectometer ?? "").replace(",", "."));
+    const raw = Number(properties.hectomtrng);
+    const km = Number.isFinite(direct) ? direct : Number.isFinite(raw) ? raw / 10 : NaN;
+    if (!Number.isFinite(km)) continue;
+    const rawWvk = Number(properties.wvk_id);
+    out.push({
+      road,
+      km,
+      lat,
+      lng,
+      direction: typeof properties.l_r === "string" ? properties.l_r : null,
+      wvkId: Number.isFinite(rawWvk) ? rawWvk : null,
+    });
+  }
+  return out;
+}
+
+export function mapMeasurementSites(raw: RawMeasurementSite[], points: RoadMetringPoint[]): MeasurementSite[] {
+  const cell = .01;
+  const key = (lat: number, lng: number) => `${Math.floor(lat / cell)}:${Math.floor(lng / cell)}`;
+  const grid = new Map<string, RoadMetringPoint[]>();
+  for (const point of points) {
+    const id = key(point.lat, point.lng);
+    const group = grid.get(id) ?? [];
+    group.push(point);
+    grid.set(id, group);
+  }
+  const out: MeasurementSite[] = [];
+  for (const site of raw) {
+    const explicit = /\b([AN])\s*0*(\d{1,3})\b/i.exec(site.name);
+    const explicitRoad = explicit ? `${explicit[1].toUpperCase()}${Number(explicit[2])}` : null;
+    if (explicitRoad?.startsWith("N")) continue;
+    const iy = Math.floor(site.lat / cell);
+    const ix = Math.floor(site.lng / cell);
+    const candidates: Array<{ point: RoadMetringPoint; distance: number }> = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      for (const point of grid.get(`${iy + dy}:${ix + dx}`) ?? []) {
+        if (explicitRoad && point.road !== explicitRoad) continue;
+        const distance = haversineM(site, point);
+        if (distance <= 180) candidates.push({ point, distance });
+      }
+    }
+    candidates.sort((a, b) => a.distance - b.distance);
+    const best = candidates[0];
+    if (!best) continue;
+    const competing = candidates.find(candidate => candidate.point.road !== best.point.road);
+    if (competing && competing.distance <= 220 && competing.distance - best.distance < 45) continue;
+    out.push({
+      ...site,
+      road: best.point.road,
+      km: best.point.km,
+      direction: best.point.direction,
+      mappingDistanceMeters: Math.round(best.distance),
+      wvkId: best.point.wvkId,
+    });
+  }
+  return out;
+}
+
+function qualityForMeasuredValue(body: string, ageSeconds: number) {
+  const supplierQuality = numberTag(body, "supplierCalculatedDataQuality");
+  const inputValues = numberTag(body, "numberOfInputValuesUsed");
+  const incompleteInputs = numberTag(body, "numberOfIncompleteInputs");
+  let quality = supplierQuality === null ? 85 : clamp(supplierQuality, 0, 100);
+  if (inputValues !== null && inputValues > 0 && incompleteInputs !== null) {
+    const completeness = clamp(1 - incompleteInputs / inputValues, 0, 1);
+    quality *= 0.65 + 0.35 * completeness;
+  }
+  if (ageSeconds > 120) quality *= 0.85;
+  if (ageSeconds > 180) quality *= 0.7;
+  return {
+    qualityScore: Math.round(clamp(quality, 0, 100)),
+    inputValues,
+    incompleteInputs,
+  };
+}
+
+export function parseTrafficSamples(xml: string, siteMap: Map<string, SiteConfig>): SiteTraffic[] {
+  const out: SiteTraffic[] = [];
+  const regex = /<(?:(?:[A-Za-z0-9_-]+):)?siteMeasurements\b[^>]*>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?siteMeasurements>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml))) {
+    const body = match[1];
+    const ref = /<(?:(?:[A-Za-z0-9_-]+):)?measurementSiteReference\b([^>]*)\/?\s*>/i.exec(body);
+    const id = ref ? attr(ref[1], "id") : null;
+    if (!id) continue;
+    const config = siteMap.get(id);
+    if (!config) continue;
+    const measurementTime = tagValue(body, "measurementTimeDefault") ?? "";
+    const measuredAt = stripTags(tagValue(measurementTime, "timeValue") ?? measurementTime);
+    const measuredMs = Date.parse(measuredAt);
+    if (!Number.isFinite(measuredMs)) continue;
+    const ageSeconds = Math.abs(Date.now() - measuredMs) / 1000;
+    if (ageSeconds > 240) continue;
+
+    const speeds: Array<{ value: number; weight: number; quality: number; inputs: number | null; incomplete: number | null }> = [];
+    const flows: Array<{ value: number; quality: number; inputs: number | null; incomplete: number | null }> = [];
+    const measuredValue = /<(?:(?:[A-Za-z0-9_-]+):)?measuredValue\b([^>]*)>([\s\S]*?)<\/(?:(?:[A-Za-z0-9_-]+):)?measuredValue>/gi;
+    let valueMatch: RegExpExecArray | null;
+    while ((valueMatch = measuredValue.exec(body))) {
+      const index = Number(attr(valueMatch[1], "index"));
+      const valueBody = valueMatch[2];
+      if (!Number.isInteger(index) || /dataError[^>]*>\s*true\s*</i.test(valueBody)) continue;
+      const quality = qualityForMeasuredValue(valueBody, ageSeconds);
+      if (quality.qualityScore < 20) continue;
+      if (config.speedIndexes.has(index)) {
+        const speed = numberTag(valueBody, "speed");
+        if (speed !== null && speed >= 0 && speed <= 200 && speed !== 256) {
+          speeds.push({ value: speed, weight: 1, quality: quality.qualityScore, inputs: quality.inputValues, incomplete: quality.incompleteInputs });
+        }
+      }
+      if (config.flowIndexes.has(index)) {
+        const flow = numberTag(valueBody, "vehicleFlowRate");
+        if (flow !== null && flow >= 0 && flow <= 10000) {
+          flows.push({ value: flow, quality: quality.qualityScore, inputs: quality.inputValues, incomplete: quality.incompleteInputs });
+        }
+      }
+    }
+
+    let speed = median(speeds.map(item => item.value));
+    const flow = flows.length ? flows.reduce((sum, item) => sum + item.value, 0) : null;
+    if (speeds.length && flows.length === speeds.length) {
+      const total = flows.reduce((sum, item) => sum + item.value, 0);
+      if (total > 0) speed = speeds.reduce((sum, item, index) => sum + item.value * flows[index].value, 0) / total;
+    }
+    if (speed === null && flow === null) continue;
+
+    const qualities = [...speeds.map(item => item.quality), ...flows.map(item => item.quality)];
+    const inputs = [...speeds.map(item => item.inputs), ...flows.map(item => item.inputs)].filter((value): value is number => value !== null);
+    const incomplete = [...speeds.map(item => item.incomplete), ...flows.map(item => item.incomplete)].filter((value): value is number => value !== null);
+    out.push({
+      siteId: id,
+      measuredAt,
+      speedKph: speed === null ? null : round1(speed),
+      flowVehiclesPerHour: flow,
+      qualityScore: qualities.length ? Math.round(median(qualities) ?? 0) : 75,
+      inputValues: inputs.length ? Math.round(median(inputs) ?? 0) : null,
+      incompleteInputs: incomplete.length ? Math.round(median(incomplete) ?? 0) : null,
+    });
+  }
+  return out;
+}
+
+export const isActiveMatrix = (signal: MatrixSignal) => signal.display === "lane_closed" || signal.display === "lane_closed_ahead" || (signal.display === "speed" && (signal.speedLimit ?? 999) <= 90);
+
+export function matrixSummary(signals: MatrixSignal[]): MatrixRoadSummary[] {
+  const map = new Map<string, MatrixRoadSummary>();
+  for (const signal of signals.filter(isActiveMatrix)) {
+    if (!signal.road) continue;
+    const current = map.get(signal.road) ?? { road: signal.road, active: 0, closures: 0, lowSpeed: 0 };
+    current.active += 1;
+    if (signal.display === "lane_closed" || signal.display === "lane_closed_ahead") current.closures += 1;
+    if (signal.display === "speed" && (signal.speedLimit ?? 999) <= 70) current.lowSpeed += 1;
+    map.set(signal.road, current);
+  }
+  return [...map.values()].sort((a, b) => b.closures - a.closures || b.lowSpeed - a.lowSpeed || b.active - a.active).slice(0, 30);
+}
