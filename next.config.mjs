@@ -1,4 +1,5 @@
 /** @type {import('next').NextConfig} */
+// Redeploy marker: TOMTOM_API_KEY enabled in Vercel on 2026-08-19.
 const nextConfig = {
   poweredByHeader: false,
   async redirects() {
