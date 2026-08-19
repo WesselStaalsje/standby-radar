@@ -157,6 +157,16 @@ export function RadarDashboard() {
 
   const selected = useMemo(() => data?.advice.find(a => a.id === selectedId) ?? data?.advice[0] ?? null, [data, selectedId]);
   const selectedHistory = useMemo(() => selected ? historyFor(selected, history) : null, [selected, history]);
+  const activeStandby = useMemo(() => {
+    const byLocation = new Map<string, StandbyAdvice>();
+    for (const advice of data?.advice ?? []) {
+      if (advice.recommendedUnits <= 0) continue;
+      const previous = byLocation.get(advice.standby.id);
+      if (!previous || advice.score > previous.score) byLocation.set(advice.standby.id, advice);
+    }
+    return [...byLocation.values()].sort((a, b) => b.score - a.score);
+  }, [data]);
+  const activeUnitCount = activeStandby.reduce((sum, advice) => sum + advice.recommendedUnits, 0);
   const age = data ? Math.max(0, Math.floor((now - new Date(data.generatedAt).getTime()) / 1000)) : 0;
   const next = Math.max(0, (data?.refreshAfterSeconds ?? 30) - age);
   const focus = (advice: StandbyAdvice) => { setSelectedId(advice.id); mapRef.current?.setView([advice.standby.lat, advice.standby.lng], 13, { animate: true }); };
@@ -179,6 +189,22 @@ export function RadarDashboard() {
           <Filter label="Werkzaamheden" active={filters.works} onClick={() => setFilters(f => ({ ...f, works: !f.works }))} />
           <Filter label="Stand-by" active={filters.advice} onClick={() => setFilters(f => ({ ...f, advice: !f.advice }))} />
         </div></div>
+
+        <section className="standby-now-panel" aria-label="Actuele stand-byadviezen">
+          <div className="standby-now-heading">
+            <div><small>OPERATIONEEL ADVIES</small><strong>NU STANDBY</strong></div>
+            <span className={activeUnitCount > 0 ? "standby-now-count standby-now-count--active" : "standby-now-count"}>{activeUnitCount} voertuig{activeUnitCount === 1 ? "" : "en"}</span>
+          </div>
+          <div className="standby-now-list">
+            {activeStandby.map((advice, index) => <button key={advice.standby.id} className="standby-now-item" onClick={() => focus(advice)}>
+              <b>{advice.recommendedUnits}×</b>
+              <span><strong>{index + 1}. {advice.standby.name}</strong><small>{advice.standby.address}</small><em>{segmentLabel(advice)} · score {advice.score}/100 · {advice.confidence}</em></span>
+            </button>)}
+            {!loading && activeStandby.length === 0 && <div className="standby-now-empty"><strong>Geen actieve stand-by nodig</strong><span>Geen wegdeel staat nu boven de operationele drempel.</span></div>}
+          </div>
+          <footer>Live herberekend iedere 30 sec. · laatste analyse {data ? clock(data.generatedAt) : "—"}</footer>
+        </section>
+
         <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Automatisch gekozen stand-byplek</span></div>
       </div>
 
