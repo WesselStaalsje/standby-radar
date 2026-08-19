@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import type { RayonRoadOverlay, SourceStatus, StandbyAdvice, TrafficEvent, WeatherSnapshot } from "@/lib/types";
 import type { MeasurementSite, RoadMetringPoint, SiteTraffic } from "@/lib/ndw";
 import { matrixSummary, parseEvents, parseMatrix, parseRoadMetringPoints, parseTrafficSamples, stripTags, tagValue } from "@/lib/ndw";
-import { buildSegments, chooseDynamicStandby, haversineKm, parseOsmCandidates, parseRwsVildCandidates, segmentEvents, segmentMatrix, sensorMetrics, weatherScore, type CandidateLocation, type ScopedMeasurementSite, type Segment } from "@/lib/engine";
+import { chooseDynamicStandby, haversineKm, parseOsmCandidates, parseRwsVildCandidates, segmentEvents, segmentMatrix, sensorMetrics, weatherScore, type CandidateLocation, type ScopedMeasurementSite, type Segment } from "@/lib/engine";
 import { findImnRange, normalizeDirection, parseImnRoadRanges, parseVanEijckRayonCodes, type ImnRoadRange } from "@/lib/rayons";
 import { loadImnSiteSnapshot } from "@/lib/imn-site-snapshot";
 
@@ -24,6 +24,7 @@ const URLS = {
 };
 
 const STATIC_TTL = 6 * 60 * 60 * 1000;
+const SEGMENT_LENGTH_KM = 5;
 const BBOX = { minLat: 51.15, minLng: 4.20, maxLat: 52.30, maxLng: 6.55 };
 
 type StaticContext = {
@@ -49,7 +50,7 @@ let staticCache: StaticContext | null = null;
 const fetchText = async (url: string, revalidate: number) => {
   const response = await fetch(url, {
     next: { revalidate },
-    headers: { "user-agent": "StandbyRadar/0.7" },
+    headers: { "user-agent": "StandbyRadar/0.8" },
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -71,7 +72,7 @@ async function streamGzipRecords(
   const response = await fetch(url, {
     cache: "no-store",
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { "user-agent": "StandbyRadar/0.7" },
+    headers: { "user-agent": "StandbyRadar/0.8" },
   });
   if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
@@ -144,7 +145,7 @@ async function fetchRoadPoints() {
 
     const response = await fetch(`${URLS.rwsMetering}?${params}`, {
       next: { revalidate: 21600 },
-      headers: { "user-agent": "StandbyRadar/0.7" },
+      headers: { "user-agent": "StandbyRadar/0.8" },
     });
     if (!response.ok) throw new Error(`RWS metrering HTTP ${response.status}`);
     updatedAt = response.headers.get("last-modified") ?? response.headers.get("date") ?? updatedAt;
@@ -178,7 +179,7 @@ async function fetchVild(layer: number) {
   const response = await fetch(`${URLS.rwsVild}/${layer}/query?${params}`, {
     next: { revalidate: 21600 },
     signal: AbortSignal.timeout(12_000),
-    headers: { "user-agent": "StandbyRadar/0.7" },
+    headers: { "user-agent": "StandbyRadar/0.8" },
   });
   if (!response.ok) throw new Error(`RWS VILD ${layer} HTTP ${response.status}`);
   return {
@@ -204,7 +205,7 @@ async function fetchOsm(points: RoadMetringPoint[], ranges: ImnRoadRange[]) {
     signal: AbortSignal.timeout(7_000),
     headers: {
       "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      "user-agent": "StandbyRadar/0.7",
+      "user-agent": "StandbyRadar/0.8",
     },
     body: new URLSearchParams({ data: query }).toString(),
   });
@@ -246,6 +247,79 @@ function buildRoadOverlays(ranges: ImnRoadRange[], points: RoadMetringPoint[]): 
     });
   }
   return out;
+}
+
+function buildContractSegments(
+  ranges: ImnRoadRange[],
+  sites: ScopedMeasurementSite[],
+  roadPoints: RoadMetringPoint[],
+): Segment[] {
+  type Bucket = { rayon: string; road: string; bucketFrom: number; kmFrom: number; kmTo: number };
+  const buckets = new Map<string, Bucket>();
+
+  for (const range of ranges) {
+    let bucketFrom = Math.floor(range.fromKm / SEGMENT_LENGTH_KM) * SEGMENT_LENGTH_KM;
+    while (bucketFrom < range.toKm) {
+      const kmFrom = Math.max(bucketFrom, range.fromKm);
+      const kmTo = Math.min(bucketFrom + SEGMENT_LENGTH_KM, range.toKm);
+      if (kmTo > kmFrom) {
+        const key = `${range.rayon}:${range.road}:${bucketFrom}`;
+        const previous = buckets.get(key);
+        if (previous) {
+          previous.kmFrom = Math.min(previous.kmFrom, kmFrom);
+          previous.kmTo = Math.max(previous.kmTo, kmTo);
+        } else {
+          buckets.set(key, { rayon: range.rayon, road: range.road, bucketFrom, kmFrom, kmTo });
+        }
+      }
+      bucketFrom += SEGMENT_LENGTH_KM;
+    }
+  }
+
+  const segments: Segment[] = [];
+  for (const bucket of buckets.values()) {
+    const segmentSites = sites.filter(site =>
+      site.rayon === bucket.rayon &&
+      site.road === bucket.road &&
+      site.km >= bucket.kmFrom &&
+      site.km <= bucket.kmTo
+    );
+
+    const matchingPoints = roadPoints.filter(point => {
+      if (point.road !== bucket.road || point.km < bucket.kmFrom || point.km > bucket.kmTo) return false;
+      const range = findImnRange(point.road, point.km, point.direction, ranges) ?? anyRange(point.road, point.km, ranges);
+      return range?.rayon === bucket.rayon;
+    });
+
+    const centerKm = (bucket.kmFrom + bucket.kmTo) / 2;
+    const representative = matchingPoints
+      .slice()
+      .sort((a, b) => Math.abs(a.km - centerKm) - Math.abs(b.km - centerKm))[0];
+
+    const lat = representative?.lat
+      ?? (segmentSites.length ? segmentSites.reduce((sum, site) => sum + site.lat, 0) / segmentSites.length : null);
+    const lng = representative?.lng
+      ?? (segmentSites.length ? segmentSites.reduce((sum, site) => sum + site.lng, 0) / segmentSites.length : null);
+
+    if (lat === null || lng === null) continue;
+
+    segments.push({
+      rayon: bucket.rayon,
+      road: bucket.road,
+      kmFrom: Math.round(bucket.kmFrom * 10) / 10,
+      kmTo: Math.round(bucket.kmTo * 10) / 10,
+      centerKm,
+      lat,
+      lng,
+      sites: segmentSites,
+    });
+  }
+
+  return segments.sort((a, b) =>
+    a.road.localeCompare(b.road, "nl", { numeric: true }) ||
+    a.kmFrom - b.kmFrom ||
+    a.rayon.localeCompare(b.rayon, "nl", { numeric: true })
+  );
 }
 
 async function getStaticContext(): Promise<StaticContext> {
@@ -405,6 +479,7 @@ export async function GET() {
   const ranges = context?.ranges ?? [];
   const scopedRoadPoints = context?.scopedRoadPoints ?? [];
   const candidates = [...(context?.rwsCandidates ?? []), ...(context?.osmCandidates ?? [])];
+  const roads = [...new Set(ranges.map(range => range.road))].sort((a, b) => a.localeCompare(b, "nl", { numeric: true }));
 
   const sources: SourceStatus[] = [
     { id: "imn-scope", name: "IMN Van Eijck-rayons", ok: ranges.length > 0, updatedAt: context?.imnUpdatedAt ?? null, error: ranges.length ? null : staticError ?? "Geen IMN scope", lineage: "Stichting IMN contract + rayonindeling" },
@@ -452,7 +527,7 @@ export async function GET() {
       .catch(error => { sources[5].error = error instanceof Error ? error.message : "Niet bereikbaar"; }),
   ]);
 
-  const segments = buildSegments(sites);
+  const segments = buildContractSegments(ranges, sites, scopedRoadPoints);
   let weather = new Map<string, WeatherSnapshot>();
   try {
     weather = await weatherMap(segments.map(segment => ({ id: segmentId(segment), lat: segment.lat, lng: segment.lng })));
@@ -502,11 +577,11 @@ export async function GET() {
       : `${match.location.kind}-locatie uit OpenStreetMap`;
 
     const reasons = [
-      `${item.segment.rayon} · ${item.segment.road} km ${item.segment.kmFrom}–${item.segment.kmTo}: uitsluitend binnen het officiële Van Eijck IM-rayon`,
+      `${item.segment.rayon} · ${item.segment.road} km ${item.segment.kmFrom}–${item.segment.kmTo}: officieel gecontracteerd IM-wegdeel`,
       item.sensor.sensorCount
         ? `${item.sensor.sensorCount} verse fysieke detector(en), ${item.sensor.directionCount} rijrichtinggroep(en): ${item.sensor.averageSpeedKph ?? "—"} km/u mediaan${item.sensor.flowVehiclesPerHour !== null ? `, ${item.sensor.flowVehiclesPerHour} vtg/u mediaan` : ""}`
-        : "geen verse fysieke snelheid/intensiteit — hoge score automatisch geblokkeerd",
-      `meetpunten zijn aan officiële RWS A-wegmetrering gekoppeld (max. snapafstand ${maxSnap} m)`,
+        : "geen fysieke detector in dit wegdeel; segment blijft wel actief via matrix, incidenten, weer en historie",
+      item.sensor.sensorCount ? `meetpunten zijn aan officiële RWS A-wegmetrering gekoppeld (max. snapafstand ${maxSnap} m)` : null,
       item.msi.clusters ? `${item.msi.clusters} matrixcluster(s) uitsluitend binnen dit wegdeel` : "geen actieve matrixmaatregelen binnen dit wegdeel",
       item.incident.accidents ? `${item.incident.accidents} actueel ongeval(len) binnen/naast dit IM-rayon` : null,
       item.incident.obstructions ? `${item.incident.obstructions} actuele blokkade(s)/obstakels binnen/naast dit IM-rayon` : null,
@@ -548,7 +623,6 @@ export async function GET() {
         verified: match.location.verified,
       },
     });
-    if (advice.length >= 30) break;
   }
 
   const byRoad = matrixSummary(matrix);
@@ -576,9 +650,11 @@ export async function GET() {
       measuredSiteCount: samples.length,
       candidateLocationCount: candidates.length,
       rayonCount: context?.rayonCodes.length ?? 0,
+      roadCount: roads.length,
+      roads,
       rushHour: rushHour(),
-      modelVersion: "0.7-imn-snapshot-rws-vild",
-      note: `Alleen data binnen de ${context?.rayonCodes.length ?? 0} actuele Van Eijck/Van Eijck-Van Egeraat IM-rayons van Stichting IMN wordt verwerkt. IM-wegvakken zijn exact op wegnummer, rijrichting en hectometer begrensd. De zware NDW meetlocatieconfiguratie is vooraf gecomprimeerd; de verkeerswaarden blijven live. Primaire stand-byplekken komen uit Rijkswaterstaat VILD; OSM is alleen aanvullend.`,
+      modelVersion: "0.8-contract-master-segments",
+      note: `Alle officiële gecontracteerde A-wegvakken binnen de ${context?.rayonCodes.length ?? 0} actuele Van Eijck/Van Eijck-Van Egeraat IM-rayons worden altijd in vaste segmenten van maximaal 5 km gemonitord. Een wegdeel verdwijnt niet meer wanneer daar geen fysieke detector staat. NDW snelheid/intensiteit, RWS matrixsignalen, actuele incidenten en weer worden als beschikbare signalen aan ieder contractsegment gekoppeld.`,
     },
   }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
