@@ -326,11 +326,24 @@ export function RadarDashboard() {
     layer.clearLayers();
 
     if (filters.advice) {
-      for (const advice of stableStandby) {
+      const stableIds = new Set(stableStandby.map(item => item.standby.id));
+      const bestByLocation = new Map<string, StandbyAdvice>();
+      for (const advice of data.advice) {
+        const previous = bestByLocation.get(advice.standby.id);
+        if (!previous || advice.score > previous.score) bestByLocation.set(advice.standby.id, advice);
+      }
+
+      for (const advice of bestByLocation.values()) {
         const hist = historyFor(advice, history);
-        const icon = L.divIcon({ className: "standby-div-icon", html: `<span class="standby-pin standby-pin--${tone(advice.score)}">${advice.score}</span>`, iconSize: [38, 38], iconAnchor: [19, 19] });
-        const marker = L.marker([advice.standby.lat, advice.standby.lng], { icon, zIndexOffset: 300 });
-        marker.bindPopup(`<div class="radar-popup"><strong>${esc(advice.standby.name)}</strong><br>${esc(advice.standby.address)}<br>${esc(locationSource(advice))}<hr><strong>${esc(segmentLabel(advice))}</strong><br>${speedLabel(advice.averageSpeedKph)} · ${flowLabel(advice.flowVehiclesPerHour)}<br>Actuele score ${advice.score}/100 · zekerheid ${esc(advice.confidence)}<br><strong>Operationele positie is gestabiliseerd</strong>${hist.accidents ? `<br>Historie: ${hist.accidents} BRON-ongeval(len) · ${hist.score}/15` : ""}</div>`);
+        const isStable = stableIds.has(advice.standby.id);
+        const icon = L.divIcon({
+          className: "standby-div-icon",
+          html: `<span class="standby-pin standby-pin--${tone(advice.score)}${isStable ? " standby-pin--stable" : ""}">${advice.score}</span>`,
+          iconSize: [42, 42],
+          iconAnchor: [21, 21],
+        });
+        const marker = L.marker([advice.standby.lat, advice.standby.lng], { icon, zIndexOffset: isStable ? 360 : 260 });
+        marker.bindPopup(`<div class="radar-popup"><strong>${esc(advice.standby.name)}</strong><br>${esc(advice.standby.address)}<br>${esc(locationSource(advice))}<hr><strong>${esc(segmentLabel(advice))}</strong><br>${speedLabel(advice.averageSpeedKph)} · ${flowLabel(advice.flowVehiclesPerHour)}<br>Actuele score ${advice.score}/100 · zekerheid ${esc(advice.confidence)}<br><strong>${isStable ? "GESTABILISEERDE OPERATIONELE POSITIE" : "LIVE KANDIDAATPLEK"}</strong>${hist.accidents ? `<br>Historie: ${hist.accidents} BRON-ongeval(len) · ${hist.score}/15` : ""}</div>`);
         marker.on("click", () => setSelectedId(advice.id));
         marker.addTo(layer);
       }
@@ -389,29 +402,33 @@ export function RadarDashboard() {
           </footer>
         </section>
 
-        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Gestabiliseerde stand-byplek</span></div>
+        <div className="legend"><span><i className="dot accident" /> Ongeval</span><span><i className="dot obstruction" /> Obstakel</span><span><i className="dot traffic" /> File</span><span><i className="ring" /> Live kandidaatplek</span><span><i className="ring ring--stable" /> Gestabiliseerd</span></div>
       </div>
 
-      <aside className="sidebar"><div className="side-scroll">
-        {error && <div className="error-card">{error}</div>}
+      <aside className="sidebar">
+        <div className="sidebar-layout">
+          <div className="side-scroll">
+            {error && <div className="error-card">{error}</div>}
 
-        <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 9} online</span></div><div className="sources">{data?.sources.map(source => <span key={source.id} className={source.ok ? "source source--ok" : "source"} title={`${source.lineage ?? ""}${source.updatedAt ? ` · ${clock(source.updatedAt)}` : ""}${source.error ? ` · ${source.error}` : ""}`}>{source.name}</span>)}{history && <span className={history.error ? "source" : "source source--ok"} title={history.note}>{history.error ? "BRON historie fout" : "RWS BRON historie"}</span>}</div></section>
+            <section className="block"><div className="block-title"><strong>BRONSTATUS</strong><span>{data?.sources.filter(s => s.ok).length ?? 0}/{data?.sources.length ?? 9} online</span></div><div className="sources">{data?.sources.map(source => <span key={source.id} className={source.ok ? "source source--ok" : "source"} title={`${source.lineage ?? ""}${source.updatedAt ? ` · ${clock(source.updatedAt)}` : ""}${source.error ? ` · ${source.error}` : ""}`}>{source.name}</span>)}{history && <span className={history.error ? "source" : "source source--ok"} title={history.note}>{history.error ? "BRON historie fout" : "RWS BRON historie"}</span>}</div></section>
 
-        <section className="block"><div className="block-title"><strong>LIVE WEGVAKANALYSE</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
-          {data?.advice.slice(0, 12).map((advice, index) => { const hist = historyFor(advice, history); return <button key={advice.id} className={`advice-card ${selected?.id === advice.id ? "advice-card--selected" : ""}`} onClick={() => focus(advice)}>
-            <span className={`score score--${tone(advice.score)}`}>{advice.score}</span><span className="advice-copy"><strong>{index + 1}. {segmentLabel(advice)}<em>{advice.recommendedUnits}×</em></strong><small>Live kandidaat → {advice.standby.name} · {locationSource(advice)}</small><span>{speedLabel(advice.averageSpeedKph)} · {flowLabel(advice.flowVehiclesPerHour)} · {advice.sensorCount} meetpunt(en)</span>{hist.accidents > 0 && <small>Historie 2022–2024: {hist.accidents} ongeval(len) · risico {hist.score}/15</small>}<small>{advice.standby.address}</small></span>
-          </button>; })}
-          {!loading && data && data.advice.length === 0 && <div className="error-card">Geen live wegvakanalyse ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
-        </div></section>
+            <section className="block"><div className="block-title"><strong>LIVE WEGVAKANALYSE</strong><span>{data?.advice.length ?? 0} berekend</span></div><div className="advice-list">
+              {data?.advice.slice(0, 12).map((advice, index) => { const hist = historyFor(advice, history); return <button key={advice.id} className={`advice-card ${selected?.id === advice.id ? "advice-card--selected" : ""}`} onClick={() => focus(advice)}>
+                <span className={`score score--${tone(advice.score)}`}>{advice.score}</span><span className="advice-copy"><strong>{index + 1}. {segmentLabel(advice)}<em>{advice.recommendedUnits}×</em></strong><small>Live kandidaat → {advice.standby.name} · {locationSource(advice)}</small><span>{speedLabel(advice.averageSpeedKph)} · {flowLabel(advice.flowVehiclesPerHour)} · {advice.sensorCount} meetpunt(en)</span>{hist.accidents > 0 && <small>Historie 2022–2024: {hist.accidents} ongeval(len) · risico {hist.score}/15</small>}<small>{advice.standby.address}</small></span>
+              </button>; })}
+              {!loading && data && data.advice.length === 0 && <div className="error-card">Geen live wegvakanalyse ontvangen terwijl er wel brondata beschikbaar is. Automatische herpoging loopt bij de volgende refresh.</div>}
+            </div></section>
 
-        {selected && <section className="why-card"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{segmentLabel(selected)}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
-          <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Historisch risico" value={`${selectedHistory?.score ?? 0}/15`} /></div>
-          <ul>{selected.reasons.filter(reason => !reason.includes("IM-rayon")).map(reason => <li key={reason}>{reason}</li>)}{selectedHistory && selectedHistory.accidents > 0 && <li>Historie: {selectedHistory.accidents} geregistreerde BRON-ongevallen in overlappende 5-km-vakken ({selectedHistory.years.join(", ")}){selectedHistory.severe ? `, waarvan ${selectedHistory.severe} met zwaardere afloop` : ""}.</li>}</ul>
-          <p>De live wegvakanalyse ververst iedere 30 seconden. De operationele stand-bypositie links onder gebruikt daarnaast een stabiliteitsregel: minimaal 30 minuten blijven, daarna alleen wisselen als een alternatief minimaal 15 punten beter is en dit 5 minuten aanhoudt. Alleen bij een uitzonderlijk zwaar live signaal kan direct worden gewisseld.</p>
-        </section>}
+            <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>De backend beperkt de analyse tot het gecontracteerde werkgebied. Stand-byposities worden bewust gestabiliseerd om onnodige verplaatsingen en lege kilometers te voorkomen.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
+          </div>
 
-        <div className="disclaimer"><strong>MODEL {data?.meta.modelVersion ?? "—"}</strong><p>De backend beperkt de analyse tot het gecontracteerde werkgebied. Stand-byposities worden bewust gestabiliseerd om onnodige verplaatsingen en lege kilometers te voorkomen.</p>{history && <p>Historische context: {history.source}. {history.note}</p>}</div>
-      </div></aside>
+          {selected && <section className="why-card why-card--fixed"><div className="why-heading"><div><small>WAAROM DEZE PLEK?</small><strong>{segmentLabel(selected)}</strong><span className="standby-address">→ {selected.standby.name}<br />{selected.standby.address}</span></div><b>{selected.score}</b></div>
+            <div className="why-grid"><Metric label="Snelheid" value={speedLabel(selected.averageSpeedKph)} /><Metric label="Intensiteit" value={flowLabel(selected.flowVehiclesPerHour)} /><Metric label="Meetpunten" value={selected.sensorCount} /><Metric label="Bronbevestiging" value={`${selected.corroboratingSignals}/4`} /><Metric label="Matrix lokaal" value={selected.matrixClusters} /><Metric label="Historisch risico" value={`${selectedHistory?.score ?? 0}/15`} /></div>
+            <ul>{selected.reasons.filter(reason => !reason.includes("IM-rayon")).map(reason => <li key={reason}>{reason}</li>)}{selectedHistory && selectedHistory.accidents > 0 && <li>Historie: {selectedHistory.accidents} geregistreerde BRON-ongevallen in overlappende 5-km-vakken ({selectedHistory.years.join(", ")}){selectedHistory.severe ? `, waarvan ${selectedHistory.severe} met zwaardere afloop` : ""}.</li>}</ul>
+            <p>De live wegvakanalyse ververst iedere 30 seconden. De operationele stand-bypositie links onder gebruikt daarnaast een stabiliteitsregel: minimaal 30 minuten blijven, daarna alleen wisselen als een alternatief minimaal 15 punten beter is en dit 5 minuten aanhoudt. Alleen bij een uitzonderlijk zwaar live signaal kan direct worden gewisseld.</p>
+          </section>}
+        </div>
+      </aside>
     </section>
   </main>;
 }
