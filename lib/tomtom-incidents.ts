@@ -147,25 +147,9 @@ function direction(value: RoadDirection): RoadDirection {
   return value === "Li" || value === "Re" ? value : null;
 }
 
-function convertIncident(incident: TomTomIncident, overlays: Overlay[]): TrafficEvent | null {
-  if (incident.properties?.iconCategory !== 14) return null;
-  const point = representativePoint(incident);
-  if (!point) return null;
-  const roads = normalizeRoadNumbers(incident.properties.roadNumbers);
-  let matched: ReturnType<typeof matchOverlay> = null;
-  let matchedRoad: string | null = null;
-  for (const road of roads) {
-    const candidate = matchOverlay(point, road, overlays);
-    if (candidate && (!matched || candidate.distance < matched.distance)) {
-      matched = candidate;
-      matchedRoad = road;
-    }
-  }
-  if (!matched || !matchedRoad) return null;
-
-  const roadKm = matched.overlay.fromKm + (matched.overlay.toKm - matched.overlay.fromKm) * matched.fraction;
+function baseEvent(incident: TomTomIncident, point: GeoPoint, road: string): TrafficEvent {
   const description = incident.properties?.events?.map(item => item.description?.trim()).find(Boolean);
-  const id = incident.properties?.id ?? `${matchedRoad}-${point.lat.toFixed(5)}-${point.lng.toFixed(5)}`;
+  const id = incident.properties?.id ?? `${road}-${point.lat.toFixed(5)}-${point.lng.toFixed(5)}`;
   return {
     id: `TOMTOM-BDV-${id}`,
     kind: "obstruction",
@@ -173,16 +157,59 @@ function convertIncident(incident: TomTomIncident, overlays: Overlay[]): Traffic
     type: "TomTomBrokenDownVehicle",
     lat: point.lat,
     lng: point.lng,
-    roadRef: matchedRoad,
-    roadKm: Math.round(roadKm * 10) / 10,
-    direction: direction(matched.overlay.direction),
+    roadRef: road,
     queueLengthMeters: null,
     source: "TomTom Traffic",
     updatedAt: incident.properties?.lastReportTime ?? incident.properties?.startTime ?? new Date().toISOString(),
-    rayon: matched.overlay.rayon,
-    mappingDistanceMeters: Math.round(matched.distance),
     startsAt: incident.properties?.startTime ?? null,
     endsAt: incident.properties?.endTime ?? null,
+  };
+}
+
+function convertIncident(
+  incident: TomTomIncident,
+  overlays: Overlay[],
+  trackedRoads: Set<string>,
+): TrafficEvent | null {
+  if (incident.properties?.iconCategory !== 14) return null;
+  const point = representativePoint(incident);
+  if (!point) return null;
+
+  const roads = normalizeRoadNumbers(incident.properties.roadNumbers);
+  const eligibleRoads = roads.filter(road => trackedRoads.has(road));
+  if (!eligibleRoads.length) return null;
+
+  let matched: ReturnType<typeof matchOverlay> = null;
+  let matchedRoad: string | null = null;
+  for (const road of eligibleRoads) {
+    const candidate = matchOverlay(point, road, overlays);
+    if (candidate && (!matched || candidate.distance < matched.distance)) {
+      matched = candidate;
+      matchedRoad = road;
+    }
+  }
+
+  // Prefer the exact IM geometry whenever it is usable. Some legacy overlay
+  // geometries are intentionally sparse, though; do not silently discard a
+  // current TomTom breakdown on a road that is explicitly part of our tracked
+  // motorway scope just because that geometry cannot be matched confidently.
+  if (!matched || !matchedRoad) {
+    return {
+      ...baseEvent(incident, point, eligibleRoads[0]),
+      roadKm: null,
+      direction: null,
+      rayon: null,
+      mappingDistanceMeters: null,
+    };
+  }
+
+  const roadKm = matched.overlay.fromKm + (matched.overlay.toKm - matched.overlay.fromKm) * matched.fraction;
+  return {
+    ...baseEvent(incident, point, matchedRoad),
+    roadKm: Math.round(roadKm * 10) / 10,
+    direction: direction(matched.overlay.direction),
+    rayon: matched.overlay.rayon,
+    mappingDistanceMeters: Math.round(matched.distance),
   };
 }
 
@@ -207,9 +234,14 @@ async function fetchBox(box: readonly [number, number, number, number], apiKey: 
 export async function fetchTomTomBrokenDownVehicles(
   overlays: Overlay[],
   apiKey: string | undefined,
+  trackedRoadNumbers?: string[],
 ): Promise<TomTomBrokenDownResult> {
   if (!apiKey) return { configured: false, updatedAt: null, events: [], rawCount: 0, matchedCount: 0, successfulBoxes: 0, error: "TOMTOM_API_KEY ontbreekt" };
 
+  const trackedRoads = new Set(
+    (trackedRoadNumbers?.length ? trackedRoadNumbers : overlays.map(overlay => overlay.road))
+      .map(road => road.toUpperCase()),
+  );
   const settled = await Promise.allSettled(BBOXES.map(box => fetchBox(box, apiKey)));
   const errors: string[] = [];
   const incidents = new Map<string, TomTomIncident>();
@@ -231,7 +263,7 @@ export async function fetchTomTomBrokenDownVehicles(
   }
 
   const events = [...incidents.values()].flatMap(incident => {
-    const event = convertIncident(incident, overlays);
+    const event = convertIncident(incident, overlays, trackedRoads);
     return event ? [event] : [];
   });
 
