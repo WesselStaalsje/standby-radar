@@ -139,7 +139,11 @@ export async function GET(request: Request) {
   const data = polishOperationalData(await response.json() as LiveRadarData);
   let brokenDown;
   try {
-    brokenDown = await fetchTomTomBrokenDownVehicles(data.rayons.roadOverlays, process.env.TOMTOM_API_KEY);
+    brokenDown = await fetchTomTomBrokenDownVehicles(
+      data.rayons.roadOverlays,
+      process.env.TOMTOM_API_KEY,
+      data.meta.roads,
+    );
   } catch (error) {
     brokenDown = {
       configured: Boolean(process.env.TOMTOM_API_KEY),
@@ -161,7 +165,7 @@ export async function GET(request: Request) {
       ok: brokenDown.configured && brokenDown.successfulBoxes > 0,
       updatedAt: brokenDown.updatedAt,
       error: brokenDown.configured ? brokenDown.error : "TOMTOM_API_KEY ontbreekt",
-      lineage: `TomTom Traffic Incident Details v5 · BrokenDownVehicle · ${brokenDown.matchedCount}/${brokenDown.rawCount} incident(en) binnen operationele IM-weggeometrie`,
+      lineage: `TomTom Traffic Incident Details v5 · BrokenDownVehicle · ${brokenDown.matchedCount}/${brokenDown.rawCount} incident(en) op gevolgde snelwegen binnen de opgehaalde regio`,
     },
   ];
 
@@ -174,7 +178,7 @@ export async function GET(request: Request) {
       eventCount: merged.events.length,
       obstructionCount: merged.events.filter(event => event.kind === "obstruction").length,
       modelVersion: "2.3-tomtom-broken-down-vehicles",
-      note: `${data.meta.note} TomTom Incident Details v5 voegt actuele stilstaande/defecte voertuigen toe aan de kaart; overlap met NDW VehicleObstruction wordt binnen 500 meter samengevoegd in plaats van dubbel getoond.`,
+      note: `${data.meta.note} TomTom Incident Details v5 voegt actuele stilstaande/defecte voertuigen toe aan de kaart; exacte IM-geometriematch heeft voorkeur, maar een TomTom-melding op een gevolgde snelweg wordt niet meer weggegooid wanneer de lokale overlaygeometrie te schaars is. Overlap met NDW VehicleObstruction wordt binnen 500 meter samengevoegd in plaats van dubbel getoond.`,
     },
   }, {
     headers: { "Cache-Control": "no-store, max-age=0" },
