@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { LayerGroup, Map as LeafletMap } from "leaflet";
+import type { LayerGroup, Map as LeafletMap, TileLayer } from "leaflet";
 import type { LiveRadarData, StandbyAdvice, TrafficEvent, TrafficKind } from "@/lib/types";
 
 type Filters = { traffic: boolean; incidents: boolean; works: boolean; advice: boolean };
@@ -145,6 +145,7 @@ export function RadarDashboard() {
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const layerRef = useRef<LayerGroup | null>(null);
+  const trafficLayerRef = useRef<TileLayer | null>(null);
   const requestSeq = useRef(0);
   const inFlightRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
@@ -284,7 +285,33 @@ export function RadarDashboard() {
       if (dead || !mapEl.current) return;
       leafletRef.current = L;
       const map = L.map(mapEl.current, { center: [51.75, 5.45], zoom: 8, zoomControl: false, preferCanvas: true });
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
+
+      // OSM blijft onderop als stille fallback wanneer een TomTom tile tijdelijk niet beschikbaar is.
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        zIndex: 1,
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
+
+      L.tileLayer("/api/tomtom-map/{z}/{x}/{y}", {
+        maxZoom: 22,
+        maxNativeZoom: 22,
+        zIndex: 2,
+        attribution: "Map &copy; TomTom",
+      }).addTo(map);
+
+      const trafficLayer = L.tileLayer("/api/tomtom-traffic/{z}/{x}/{y}", {
+        maxZoom: 22,
+        maxNativeZoom: 22,
+        zIndex: 180,
+        opacity: 0.78,
+        updateWhenIdle: false,
+        keepBuffer: 3,
+        attribution: "Traffic &copy; TomTom",
+      });
+      trafficLayer.addTo(map);
+      trafficLayerRef.current = trafficLayer;
+
       L.control.zoom({ position: "bottomright" }).addTo(map);
       L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
       layerRef.current = L.layerGroup().addTo(map);
@@ -293,8 +320,26 @@ export function RadarDashboard() {
       setMapReady(true);
       setTimeout(() => map.invalidateSize(), 60);
     })();
-    return () => { dead = true; mapRef.current?.remove(); mapRef.current = null; leafletRef.current = null; layerRef.current = null; };
+    return () => {
+      dead = true;
+      mapRef.current?.remove();
+      mapRef.current = null;
+      leafletRef.current = null;
+      layerRef.current = null;
+      trafficLayerRef.current = null;
+    };
   }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const trafficLayer = trafficLayerRef.current;
+    if (!mapReady || !map || !trafficLayer) return;
+    if (filters.traffic) {
+      if (!map.hasLayer(trafficLayer)) trafficLayer.addTo(map);
+    } else if (map.hasLayer(trafficLayer)) {
+      map.removeLayer(trafficLayer);
+    }
+  }, [mapReady, filters.traffic]);
 
   useEffect(() => {
     const L = leafletRef.current, layer = layerRef.current;
@@ -380,7 +425,7 @@ export function RadarDashboard() {
         <div className="map-hud"><div className="stats">
           <Stat label="Wegsegmenten" value={data?.meta.segmentCount} /><Stat label="Snelwegen" value={data?.meta.roadCount} /><Stat label="Verse meetpunten" value={data?.meta.measuredSiteCount} /><Stat label="Kandidaatplekken" value={data?.meta.candidateLocationCount} />
         </div><div className="filters">
-          <Filter label="Verkeer" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
+          <Filter label="Verkeersflow" active={filters.traffic} onClick={() => setFilters(f => ({ ...f, traffic: !f.traffic }))} />
           <Filter label="Incidenten" active={filters.incidents} onClick={() => setFilters(f => ({ ...f, incidents: !f.incidents }))} />
           <Filter label="Werkzaamheden" active={filters.works} onClick={() => setFilters(f => ({ ...f, works: !f.works }))} />
           <Filter label="Stand-by" active={filters.advice} onClick={() => setFilters(f => ({ ...f, advice: !f.advice }))} />
@@ -402,7 +447,7 @@ export function RadarDashboard() {
         </section>
 
         <div className="legend">
-          <span><LegendIcon type="breakdown" /> Stilstaand</span><span><LegendIcon type="accident" /> Ongeval</span><span><LegendIcon type="obstruction" /> Obstakel</span><span><LegendIcon type="traffic" /> File</span><span><LegendIcon type="works" /> Werk</span><span><LegendIcon type="standby" /> Kandidaat</span><span><LegendIcon type="stable" /> Gestabiliseerd</span>
+          <span><LegendIcon type="breakdown" /> Stilstaand</span><span><LegendIcon type="accident" /> Ongeval</span><span><LegendIcon type="obstruction" /> Obstakel</span><span><LegendIcon type="traffic" /> File/traag</span><span><LegendIcon type="works" /> Werk</span><span><LegendIcon type="standby" /> Kandidaat</span><span><LegendIcon type="stable" /> Gestabiliseerd</span>
         </div>
       </div>
 
