@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "leaflet/dist/leaflet.css";
 import "./globals.css";
+import "./map-marker-overrides.css";
+import { TomTomIncidentIconSkin } from "@/components/tomtom-incident-icon-skin";
 
 export const metadata: Metadata = {
   title: "Standby Radar",
@@ -10,7 +12,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="nl">
-      <body>{children}</body>
+      <body>
+        <TomTomIncidentIconSkin />
+        {children}
+      </body>
     </html>
   );
 }
