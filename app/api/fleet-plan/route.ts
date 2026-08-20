@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { GET as getLiveV7 } from "../live-v7/route";
+import { GET as getOperationalLive } from "../live-operational/route";
 import type { LiveRadarData } from "@/lib/types";
 import { optimizeFleet } from "@/lib/reliability";
 
@@ -10,7 +10,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const requested = Number(url.searchParams.get("units") ?? "4");
   const units = Number.isFinite(requested) ? Math.max(1, Math.min(20, Math.floor(requested))) : 4;
-  const response = await getLiveV7(request);
+  const response = await getOperationalLive(request);
   if (!response.ok) return response;
   const data = await response.json() as LiveRadarData;
   const plan = optimizeFleet(data.advice, units);
