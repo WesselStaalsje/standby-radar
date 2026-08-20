@@ -1,0 +1,93 @@
+/* Compact map markers + room for TomTom's official incident sprite skin. */
+.event-div-icon,
+.standby-div-icon {
+  display: grid !important;
+  place-items: center !important;
+}
+
+.event-pin {
+  width: 28px !important;
+  height: 28px !important;
+  border-width: 1.5px !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 7px rgba(7, 20, 29, .34), 0 0 0 1px rgba(7, 20, 29, .18) !important;
+}
+
+.event-pin svg {
+  width: 17px !important;
+  height: 17px !important;
+}
+
+.event-pin__source {
+  right: -4px !important;
+  bottom: -4px !important;
+  width: 11px !important;
+  height: 11px !important;
+  border-width: 1px !important;
+  font-size: 5.5px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .28) !important;
+}
+
+.event-cluster {
+  width: 34px !important;
+  height: 34px !important;
+  border-width: 2px !important;
+  border-radius: 11px !important;
+  box-shadow: 0 3px 9px rgba(0, 0, 0, .34) !important;
+}
+
+.event-cluster svg {
+  width: 17px !important;
+  height: 17px !important;
+}
+
+.event-cluster b {
+  right: -5px !important;
+  top: -5px !important;
+  min-width: 17px !important;
+  height: 17px !important;
+  padding: 0 3px !important;
+  border-width: 1.5px !important;
+  font-size: 7px !important;
+}
+
+.standby-marker {
+  width: 38px !important;
+  height: 38px !important;
+  border-width: 2px !important;
+  border-radius: 12px !important;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .36) !important;
+}
+
+.standby-marker svg {
+  width: 20px !important;
+  height: 20px !important;
+}
+
+.standby-marker b {
+  right: -6px !important;
+  bottom: -5px !important;
+  min-width: 20px !important;
+  height: 18px !important;
+  padding: 0 4px !important;
+  border-width: 1.5px !important;
+  font-size: 7px !important;
+}
+
+.standby-marker--stable {
+  outline-width: 2px !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 4px rgba(239, 187, 96, .15), 0 3px 11px rgba(0, 0, 0, .38) !important;
+}
+
+.legend-icon {
+  width: 16px !important;
+  height: 16px !important;
+  display: grid !important;
+  place-items: center !important;
+}
+
+.legend-icon svg {
+  width: 13px !important;
+  height: 13px !important;
+}
