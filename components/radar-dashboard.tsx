@@ -17,7 +17,6 @@ type StabilityState = {
 };
 type EventMarkerType = "breakdown" | "accident" | "obstruction" | "traffic" | "works" | "closure" | "weather";
 type EventCluster = { events: TrafficEvent[]; lat: number; lng: number; roadRef: string | null };
-type RegionalWatch = { id: string; name: string; lat: number; lng: number; radiusKm: number; roads: string[] };
 
 const STANDBY_STORAGE_KEY = "standby-radar:stable-assignments:v1";
 const MIN_HOLD_MS = 30 * 60 * 1000;
@@ -27,18 +26,8 @@ const EMERGENCY_SCORE = 80;
 const MAX_RESTORE_AGE_MS = 2 * 60 * 60 * 1000;
 const AUTO_REFRESH_MS = 30_000;
 const CLUSTER_DISTANCE_METERS = 1_100;
-const REGIONAL_WATCHES: RegionalWatch[] = [
-  {
-    id: "arnhem-nijmegen",
-    name: "Arnhem–Nijmegen",
-    lat: 51.900,
-    lng: 5.840,
-    radiusKm: 27,
-    roads: ["A12", "A15", "A50", "A73", "A325", "A326"],
-  },
-];
 
-const esc = (s: string) => s.replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c] ?? c));
+const esc = (s: string) => s.replace(/[&<>'\"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c] ?? c));
 const clock = (s?: string | number | null) => { if (s === null || s === undefined) return "—"; const d = new Date(s); return Number.isNaN(d.getTime()) ? String(s) : d.toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: typeof s === "number" ? undefined : "2-digit" }); };
 const tone = (score: number) => score >= 65 ? "hot" : score >= 38 ? "warm" : "normal";
 const allow = (kind: TrafficKind, f: Filters) => kind === "traffic" ? f.traffic : kind === "works" ? f.works : f.incidents;
@@ -92,11 +81,7 @@ function standbyIconHtml(score: number, isStable: boolean, isSelected: boolean) 
   return `<span class="standby-marker standby-marker--${tone(score)}${isStable ? " standby-marker--stable" : ""}${isSelected ? " standby-marker--selected" : ""}"><svg viewBox="0 0 24 24" aria-hidden="true">${eventGlyph("standby")}</svg><b>${score}</b></span>`;
 }
 
-function regionalWatchIconHtml(score: number, activeUnits: number) {
-  return `<span class="regional-watch-marker regional-watch-marker--${tone(score)}${activeUnits > 0 ? " regional-watch-marker--active" : ""}"><span>AN</span><b>${score}</b></span>`;
-}
-
-function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+function distanceMeters(a: Pick<TrafficEvent, "lat" | "lng">, b: Pick<TrafficEvent, "lat" | "lng">) {
   const dLat = rad(b.lat - a.lat);
   const dLng = rad(b.lng - a.lng);
   const x = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
@@ -377,41 +362,6 @@ export function RadarDashboard() {
         marker.on("click", () => setSelectedId(advice.id));
         marker.addTo(layer);
       }
-
-      for (const watch of REGIONAL_WATCHES) {
-        const center = { lat: watch.lat, lng: watch.lng };
-        const nearbyEvents = data.events.filter(event => watch.roads.includes(event.roadRef ?? "") && distanceMeters(center, event) <= watch.radiusKm * 1000);
-        const nearbyAdvice = data.advice
-          .filter(advice => watch.roads.includes(advice.road) && distanceMeters(center, advice.standby) <= watch.radiusKm * 1000)
-          .sort((a, b) => (b.trafficPressureScore ?? b.score) - (a.trafficPressureScore ?? a.score));
-        const nearbyStable = stableStandby.filter(advice => watch.roads.includes(advice.road) && distanceMeters(center, advice.standby) <= watch.radiusKm * 1000);
-        const activeUnits = nearbyStable.reduce((sum, advice) => sum + advice.recommendedUnits, 0);
-        const best = nearbyAdvice[0] ?? null;
-        const livePressure = best?.trafficPressureScore ?? best?.score ?? 0;
-        const eventPressure = Math.min(78, nearbyEvents.reduce((sum, event) => {
-          const type = eventMarkerType(event);
-          const weight = type === "accident" ? 18 : type === "breakdown" ? 16 : type === "closure" ? 15 : type === "obstruction" ? 12 : type === "traffic" ? 8 : type === "weather" ? 6 : 4;
-          return sum + weight;
-        }, 0));
-        const score = Math.round(Math.max(livePressure, eventPressure));
-        const state = activeUnits > 0 ? `STANDBY ACTIEF · ${activeUnits}×` : score >= 65 ? "STANDBY OVERWEGEN" : score >= 38 ? "EXTRA MONITOREN" : "REGIO MONITOREN";
-        const accidents = nearbyEvents.filter(event => eventMarkerType(event) === "accident").length;
-        const breakdowns = nearbyEvents.filter(event => eventMarkerType(event) === "breakdown").length;
-        const icon = L.divIcon({ className: "regional-watch-div-icon", html: regionalWatchIconHtml(score, activeUnits), iconSize: [42, 42], iconAnchor: [21, 21], popupAnchor: [0, -18] });
-        const marker = L.marker([watch.lat, watch.lng], { icon, zIndexOffset: 230 });
-        marker.bindPopup(`<div class="radar-popup radar-popup--regional"><div class="popup-kicker">REGIOWATCH</div><strong>${esc(watch.name)}</strong><span>${watch.roads.join(" · ")}</span><hr><b>${esc(state)}</b><span>Regiosignaal ${score}/100 · ${nearbyEvents.length} actuele melding(en) binnen ${watch.radiusKm} km</span><span>${accidents} ongeval(len) · ${breakdowns} stilstaand/defect</span>${best ? `<span>Hoogste gekoppelde wegvakdruk: ${esc(segmentLabel(best))} · ${best.trafficPressureScore ?? best.score}/100</span><span>Dichtst bruikbare kandidaat: ${esc(best.standby.name)}</span>` : `<span>Nog geen bruikbare stand-bykandidaat in deze zone gekoppeld; de regio blijft wel permanent zichtbaar voor drukte en incidenten.</span>`}<small>TomTom live verkeersflow blijft de lokale verkeerslaag op de kaart.</small></div>`, { maxWidth: 350 });
-        marker.on("click", () => mapRef.current?.setView([watch.lat, watch.lng], Math.max(mapRef.current.getZoom(), 10), { animate: true }));
-        L.circle([watch.lat, watch.lng], {
-          radius: watch.radiusKm * 1000,
-          color: score >= 65 ? "#e25b4a" : score >= 38 ? "#e5ad4f" : "#66bfd4",
-          weight: 1,
-          opacity: .34,
-          fillOpacity: .018,
-          dashArray: "5 7",
-          interactive: false,
-        }).addTo(layer);
-        marker.addTo(layer);
-      }
     }
 
     const visibleEvents = data.events.filter(event => allow(event.kind, filters));
@@ -497,7 +447,7 @@ export function RadarDashboard() {
         </section>
 
         <div className="legend">
-          <span><LegendIcon type="breakdown" /> Stilstaand</span><span><LegendIcon type="accident" /> Ongeval</span><span><LegendIcon type="obstruction" /> Obstakel</span><span><LegendIcon type="traffic" /> File/traag</span><span><LegendIcon type="works" /> Werk</span><span><LegendIcon type="standby" /> Kandidaat</span><span><LegendIcon type="stable" /> Gestabiliseerd</span><span><i className="legend-icon legend-icon--regional">AN</i> Regiowatch</span>
+          <span><LegendIcon type="breakdown" /> Stilstaand</span><span><LegendIcon type="accident" /> Ongeval</span><span><LegendIcon type="obstruction" /> Obstakel</span><span><LegendIcon type="traffic" /> File/traag</span><span><LegendIcon type="works" /> Werk</span><span><LegendIcon type="standby" /> Kandidaat</span><span><LegendIcon type="stable" /> Gestabiliseerd</span>
         </div>
       </div>
 
