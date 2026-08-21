@@ -1,6 +1,7 @@
 /* Compact map markers + room for TomTom's official incident sprite skin. */
 .event-div-icon,
-.standby-div-icon {
+.standby-div-icon,
+.regional-watch-div-icon {
   display: grid !important;
   place-items: center !important;
 }
@@ -80,6 +81,63 @@
   box-shadow: 0 0 0 4px rgba(239, 187, 96, .15), 0 3px 11px rgba(0, 0, 0, .38) !important;
 }
 
+.regional-watch-marker {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 2px solid rgba(218, 244, 251, .92);
+  border-radius: 50%;
+  background: rgba(16, 67, 83, .94);
+  color: #e8faff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .34), 0 0 0 4px rgba(83, 187, 214, .12);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: -.2px;
+}
+
+.regional-watch-marker::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border: 1px solid rgba(94, 196, 220, .45);
+  border-radius: 50%;
+}
+
+.regional-watch-marker--warm {
+  background: rgba(122, 83, 20, .96);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .34), 0 0 0 4px rgba(229, 173, 79, .15);
+}
+
+.regional-watch-marker--hot {
+  background: rgba(123, 45, 39, .97);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .34), 0 0 0 4px rgba(226, 91, 74, .17);
+}
+
+.regional-watch-marker--active::after {
+  border-width: 2px;
+  opacity: .9;
+}
+
+.regional-watch-marker b {
+  position: absolute;
+  right: -7px;
+  bottom: -5px;
+  min-width: 20px;
+  height: 17px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid #f4fbfd;
+  border-radius: 9px;
+  background: #102630;
+  color: #fff;
+  font-size: 7px;
+  line-height: 1;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, .32);
+}
+
 .legend-icon {
   width: 16px !important;
   height: 16px !important;
@@ -90,4 +148,14 @@
 .legend-icon svg {
   width: 13px !important;
   height: 13px !important;
+}
+
+.legend-icon--regional {
+  border-radius: 50%;
+  border: 1px solid rgba(218, 244, 251, .85);
+  background: #104353;
+  color: #e8faff;
+  font-size: 6px;
+  font-style: normal;
+  font-weight: 900;
 }
