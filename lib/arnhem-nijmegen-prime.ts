@@ -48,8 +48,10 @@ export async function primeArnhemNijmegenCandidates() {
   if (primedUntil > Date.now()) return { added: 0, total: context.candidates.length, cached: true };
 
   const batches = await Promise.all([
+    fetchLayer(17, context, "parking", "P+R-terrein"),
     fetchLayer(18, context, "parking", "parkeerplaats"),
     fetchLayer(19, context, "service_area", "serviceplaats"),
+    fetchLayer(20, context, "parking", "parkeerterrein"),
     fetchLayer(23, context, "fuel", "tankstation"),
   ]);
 
@@ -60,9 +62,10 @@ export async function primeArnhemNijmegenCandidates() {
     if (!REGION_ROADS.has(candidate.road) || haversineKm(candidate, CENTER) > REGION_RADIUS_KM) continue;
     const candidateKey = key(candidate);
     if (existing.has(candidateKey)) continue;
-    // Deliberately keep rayon null here. The Arnhem–Nijmegen route selector is
-    // allowed to inspect cross-rayon official RWS places and then proves the
-    // actual drive via the direction-aware NWB graph.
+    // Deliberately keep rayon null here. In Arnhem–Nijmegen, an official RWS
+    // parking/P+R/service point may sit just outside an IM range while still
+    // being the safest practical base for an adjacent contract road segment.
+    // Actual suitability is always proven through the direction-aware NWB graph.
     context.candidates.push({ ...candidate, rayon: null });
     existing.add(candidateKey);
     added += 1;
