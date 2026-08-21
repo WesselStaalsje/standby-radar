@@ -1,12 +1,24 @@
 import { NextResponse } from "next/server";
 import type { LiveRadarData, SourceStatus } from "@/lib/types";
 import { tightenArnhemNijmegenCoverage } from "@/lib/arnhem-nijmegen-coverage";
+import { primeArnhemNijmegenCandidates } from "@/lib/arnhem-nijmegen-prime";
 import { GET as getOperationalLive } from "../live-operational/route";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  // Prime the shared static V5 context before the normal engine runs. This
+  // prevents official RWS places around Arnhem/Nijmegen from disappearing
+  // merely because the place itself falls just outside an exact IM range.
+  // The live engine still has to prove reachability over the NWB graph.
+  try {
+    await primeArnhemNijmegenCandidates();
+  } catch {
+    // Fail open: the regular live engine remains available even if the extra
+    // RWS candidate query temporarily fails.
+  }
+
   const response = await getOperationalLive(request);
   if (!response.ok) return response;
 
