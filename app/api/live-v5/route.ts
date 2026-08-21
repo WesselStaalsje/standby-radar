@@ -16,6 +16,10 @@ export const runtime = "nodejs";
 
 const SEGMENT_LENGTH_KM = 5;
 const MODEL_VERSION = "2.0-directional-reliability";
+const ARNHEM_NIJMEGEN_CENTER = { lat: 51.9, lng: 5.84 };
+const ARNHEM_NIJMEGEN_RADIUS_KM = 42;
+const ARNHEM_NIJMEGEN_STANDBY_SEARCH_KM = 30;
+const ARNHEM_NIJMEGEN_ROADS = new Set(["A12", "A15", "A50", "A73", "A325", "A326", "A348"]);
 
 const locationQuality = (location: CandidateLocation) => location.kind === "service_area" ? 18 : location.kind === "fuel" ? 17 : location.kind === "parking" ? 15 : 10;
 
@@ -122,10 +126,17 @@ function historyScore(segment: Segment, history: Array<{ road: string; kmFrom: n
 }
 
 function routeStandby(segment: Segment, context: V5StaticContext, chosen: CandidateLocation[]) {
-  const candidates = context.candidates.filter(candidate => candidate.rayon === segment.rayon);
+  const inArnhemNijmegen = ARNHEM_NIJMEGEN_ROADS.has(segment.road)
+    && haversineKm(segment, ARNHEM_NIJMEGEN_CENTER) <= ARNHEM_NIJMEGEN_RADIUS_KM;
+  const candidates = context.candidates.filter(candidate =>
+    candidate.rayon === segment.rayon
+    || (inArnhemNijmegen && haversineKm(segment, candidate) <= ARNHEM_NIJMEGEN_STANDBY_SEARCH_KM),
+  );
   const routed = candidates.flatMap(candidate => {
     const reused = chosen.some(item => item.id === candidate.id);
     const overlap = chosen.some(item => item.road === candidate.road && normalizeRoadDirection(item.direction) === normalizeRoadDirection(candidate.direction) && Math.abs(item.accessKm - candidate.accessKm) < 8);
+    const crossRayonPenalty = candidate.rayon === segment.rayon ? 0 : 4;
+    const sameRoadBonus = candidate.road === segment.road ? 2 : 0;
     if (context.graph && candidate.wvkId && segment.wvkIds.length) {
       const routes = segment.wvkIds.map(wvkId => context.graph!.route(candidate.wvkId!, wvkId, 80)).filter(route => route.reachable && route.distanceKm !== null && route.etaMinutes !== null);
       routes.sort((a, b) => (a.etaMinutes ?? Infinity) - (b.etaMinutes ?? Infinity));
@@ -134,7 +145,7 @@ function routeStandby(segment: Segment, context: V5StaticContext, chosen: Candid
       return [{
         location: { ...candidate, routeDistanceKm: route.distanceKm, routeEtaMinutes: route.etaMinutes, routeVerified: true },
         roadDistance: Math.abs(candidate.accessKm - segment.centerKm),
-        rank: locationQuality(candidate) - (route.etaMinutes ?? 25) * 1.1 - (reused ? 18 : 0) - (overlap ? 5 : 0),
+        rank: locationQuality(candidate) + sameRoadBonus - (route.etaMinutes ?? 25) * 1.1 - crossRayonPenalty - (reused ? 18 : 0) - (overlap ? 5 : 0),
       }];
     }
     const candidateDirection = normalizeRoadDirection(candidate.direction);
@@ -145,7 +156,7 @@ function routeStandby(segment: Segment, context: V5StaticContext, chosen: Candid
     return [{
       location: { ...candidate, routeDistanceKm: Math.round(roadDistance * 10) / 10, routeEtaMinutes: Math.round(eta * 10) / 10, routeVerified: false },
       roadDistance,
-      rank: locationQuality(candidate) - eta * 1.2 - (segment.direction && !candidateDirection ? 8 : 0) - (reused ? 18 : 0) - (overlap ? 5 : 0),
+      rank: locationQuality(candidate) + sameRoadBonus - eta * 1.2 - crossRayonPenalty - (segment.direction && !candidateDirection ? 8 : 0) - (reused ? 18 : 0) - (overlap ? 5 : 0),
     }];
   }).sort((a, b) => b.rank - a.rank || (a.location.routeEtaMinutes ?? Infinity) - (b.location.routeEtaMinutes ?? Infinity));
   return routed[0] ?? null;
@@ -316,7 +327,7 @@ export async function GET() {
       measuredSiteCount: live.samples.size,
       candidateLocationCount: context.candidates.length,
       modelVersion: MODEL_VERSION,
-      note: "Operationele v2-engine: IM-contractsegmenten zijn per Li/Re gescheiden. Fysieke detectoren worden op kwaliteit en uitbijters gevalideerd, intensiteit wordt waar betrouwbaar per effectieve rijstrook genormaliseerd, FCD-kwaliteit gebruikt afzonderlijk beschikbaarheid/tijdigheid/dekking, bronconflicten verlagen de betrouwbaarheid, verkeersdruk en incidentrisico 30/60 minuten zijn gescheiden, en stand-byroutering gebruikt waar mogelijk de officiële NWB-topologie. Eigen kwartierbaselines en replay/backtests groeien zodra de beveiligde Standby Radar-databasevariabele in Vercel is gekoppeld.",
+      note: "Operationele v2-engine: IM-contractsegmenten zijn per Li/Re gescheiden. Fysieke detectoren worden op kwaliteit en uitbijters gevalideerd, intensiteit wordt waar betrouwbaar per effectieve rijstrook genormaliseerd, FCD-kwaliteit gebruikt afzonderlijk beschikbaarheid/tijdigheid/dekking, bronconflicten verlagen de betrouwbaarheid, verkeersdruk en incidentrisico 30/60 minuten zijn gescheiden, en stand-byroutering gebruikt waar mogelijk de officiële NWB-topologie. In Arnhem–Nijmegen blijven de wegdelen afzonderlijk gemonitord; voor stand-by mag de routering daar ook een officiële RWS-locatie in een aangrenzend rayon gebruiken wanneer die via NWB binnen 25 minuten bereikbaar is. Eigen kwartierbaselines en replay/backtests groeien zodra de beveiligde Standby Radar-databasevariabele in Vercel is gekoppeld.",
       fcdCoverageSegments: advice.filter(item => (item.travelTimeSampleCount ?? 0) > 0).length,
       travelTimeSampleCount: live.travelSamples.size,
       routeVerifiedCount: advice.filter(item => item.routeVerified).length,
