@@ -51,33 +51,112 @@
   font-size: 7px !important;
 }
 
+/*
+ * Stand-by targets
+ * Compact TomTom-like operational target silhouette: round target body,
+ * short map-pin point and a dark score badge. Status still follows the
+ * existing normal / warm / hot scoring so no map logic changes are needed.
+ */
 .standby-marker {
-  width: 38px !important;
-  height: 38px !important;
-  border-width: 2px !important;
-  border-radius: 12px !important;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, .36) !important;
+  position: relative !important;
+  width: 36px !important;
+  height: 36px !important;
+  display: grid !important;
+  place-items: center !important;
+  overflow: visible !important;
+  border: 2px solid rgba(255, 255, 255, .96) !important;
+  border-radius: 50% !important;
+  background: #547b68 !important;
+  color: #f5fbf8 !important;
+  box-shadow: 0 2px 8px rgba(4, 20, 16, .38), 0 0 0 1px rgba(19, 48, 38, .24) !important;
+  transform-origin: 50% 60% !important;
+  isolation: isolate !important;
+}
+
+.standby-marker::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 50% !important;
+  bottom: -4px !important;
+  width: 9px !important;
+  height: 9px !important;
+  z-index: -1 !important;
+  transform: translateX(-50%) rotate(45deg) !important;
+  border-right: 2px solid rgba(255, 255, 255, .96) !important;
+  border-bottom: 2px solid rgba(255, 255, 255, .96) !important;
+  border-radius: 1px !important;
+  background: #547b68 !important;
 }
 
 .standby-marker svg {
-  width: 20px !important;
-  height: 20px !important;
+  position: relative !important;
+  z-index: 2 !important;
+  width: 21px !important;
+  height: 21px !important;
+  padding: 2px !important;
+  overflow: visible !important;
+  border: 1px solid rgba(230, 244, 237, .72) !important;
+  border-radius: 50% !important;
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 1.55 !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .2)) !important;
 }
 
 .standby-marker b {
-  right: -6px !important;
+  position: absolute !important;
+  right: -7px !important;
   bottom: -5px !important;
-  min-width: 20px !important;
+  z-index: 5 !important;
+  min-width: 18px !important;
   height: 18px !important;
   padding: 0 4px !important;
-  border-width: 1.5px !important;
+  display: grid !important;
+  place-items: center !important;
+  border: 1.5px solid #fff !important;
+  border-radius: 999px !important;
+  background: #101b22 !important;
+  color: #fff !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .4) !important;
   font-size: 7px !important;
+  font-weight: 900 !important;
+  line-height: 1 !important;
+  letter-spacing: -.15px !important;
+}
+
+.standby-marker--warm {
+  background: #98713b !important;
+}
+
+.standby-marker--warm::before {
+  background: #98713b !important;
+}
+
+.standby-marker--hot {
+  background: #a94742 !important;
+}
+
+.standby-marker--hot::before {
+  background: #a94742 !important;
+}
+
+.standby-marker:hover,
+.standby-marker--selected {
+  transform: scale(1.12) translateY(-1px) !important;
+  filter: brightness(1.06) !important;
+  box-shadow: 0 4px 12px rgba(4, 20, 16, .44), 0 0 0 3px rgba(255, 255, 255, .28) !important;
 }
 
 .standby-marker--stable {
-  outline-width: 2px !important;
+  outline: 2px solid #e5b45e !important;
   outline-offset: 2px !important;
-  box-shadow: 0 0 0 4px rgba(239, 187, 96, .15), 0 3px 11px rgba(0, 0, 0, .38) !important;
+  box-shadow: 0 0 0 5px rgba(229, 180, 94, .16), 0 3px 10px rgba(0, 0, 0, .4) !important;
+}
+
+.standby-marker--stable b {
+  border-color: #f5d28d !important;
 }
 
 .legend-icon {
@@ -90,4 +169,39 @@
 .legend-icon svg {
   width: 13px !important;
   height: 13px !important;
+}
+
+/* Make the legend's candidate/stable rings read like the live map targets. */
+.legend .ring {
+  position: relative !important;
+  width: 14px !important;
+  height: 14px !important;
+  border: 2px solid rgba(255, 255, 255, .96) !important;
+  background: #547b68 !important;
+  box-shadow: 0 0 0 1px rgba(53, 89, 72, .55) !important;
+}
+
+.legend .ring::before,
+.legend .ring::after {
+  content: "" !important;
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  background: rgba(255, 255, 255, .86) !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.legend .ring::before {
+  width: 7px !important;
+  height: 1px !important;
+}
+
+.legend .ring::after {
+  width: 1px !important;
+  height: 7px !important;
+}
+
+.legend .ring--stable {
+  border-color: #f4d28e !important;
+  box-shadow: 0 0 0 2px rgba(229, 180, 94, .3) !important;
 }
