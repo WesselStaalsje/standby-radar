@@ -5,7 +5,7 @@ const nextConfig = {
     return [
       {
         source: "/api/live",
-        destination: "/api/live-operational",
+        destination: "/api/live-coverage",
         permanent: false,
       },
     ];
