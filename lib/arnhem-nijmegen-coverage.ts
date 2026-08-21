@@ -81,8 +81,10 @@ async function loadRegionalCandidates(context: V5StaticContext) {
   if (candidateCache && candidateCache.expiresAt > Date.now()) return candidateCache;
 
   const results = await Promise.all([
+    fetchVildLayer(17, context, "parking", "P+R-terrein"),
     fetchVildLayer(18, context, "parking", "parkeerplaats"),
     fetchVildLayer(19, context, "service_area", "serviceplaats"),
+    fetchVildLayer(20, context, "parking", "parkeerterrein"),
     fetchVildLayer(23, context, "fuel", "tankstation"),
   ]);
 
@@ -201,8 +203,6 @@ export async function tightenArnhemNijmegenCoverage(base: LiveRadarData): Promis
   const usage = new Map<string, number>();
   const replacements = new Map<string, StandbyAdvice>();
 
-  // Process central/high-risk segments first so the best nearby official places
-  // are spread over the region instead of collapsing onto a few distant pins.
   regionalRows.sort((a, b) =>
     (b.advice.incidentRisk30 ?? b.advice.score) - (a.advice.incidentRisk30 ?? a.advice.score)
     || b.advice.score - a.advice.score,
@@ -216,8 +216,6 @@ export async function tightenArnhemNijmegenCoverage(base: LiveRadarData): Promis
     const chosen = chooseCandidate(row.advice, row.point, wvks, regional.candidates, context, usage);
 
     if (!chosen) {
-      // Never make a verified segment worse. A currently safe <=12 minute
-      // position remains in place if the wider VILD search has no alternative.
       if (currentIsSafe(row.advice)) usage.set(row.advice.standby.id, (usage.get(row.advice.standby.id) ?? 0) + 1);
       continue;
     }
@@ -254,10 +252,10 @@ export async function tightenArnhemNijmegenCoverage(base: LiveRadarData): Promis
     ok: true,
     updatedAt: regional.updatedAt ?? new Date().toISOString(),
     error: null,
-    lineage: `Per wegdeel · officiële RWS VILD-locaties · directionele NWB-routering · maximaal ${MAX_STANDBY_ETA_MINUTES} min · ${adjusted}/${regionalRows.length} segmenten herplaatst`,
+    lineage: `Per wegdeel · officiële RWS VILD/P+R/parkeerlocaties · directionele NWB-routering · maximaal ${MAX_STANDBY_ETA_MINUTES} min · ${adjusted}/${regionalRows.length} segmenten herplaatst`,
   };
 
-  const note = " Arnhem–Nijmegen gebruikt aanvullend een dekkingsguard: per directioneel wegdeel worden officiële RWS VILD-standbylocaties buiten de strikte rayonfilter opnieuw bekeken en alleen via directionele NWB-routering binnen maximaal 12 minuten geaccepteerd. Hergebruik wordt afgewaardeerd zodat de stand-bydekking niet onnodig op enkele verre punten samenklontert.";
+  const note = " Arnhem–Nijmegen gebruikt aanvullend een dekkingsguard: per directioneel wegdeel worden officiële RWS VILD-serviceplaatsen, parkeerplaatsen, parkeerterreinen en P+R-locaties buiten de strikte rayonfilter opnieuw bekeken en alleen via directionele NWB-routering binnen maximaal 12 minuten geaccepteerd. Hergebruik wordt afgewaardeerd zodat de stand-bydekking niet onnodig op enkele verre punten samenklontert.";
 
   return {
     data: {
