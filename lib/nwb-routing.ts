@@ -137,13 +137,20 @@ export class NwbRoutingGraph {
   }
 
   route(fromWvkId: number, toWvkId: number, maxDistanceKm = 80): NwbRouteResult {
+    // A candidate and a target that share the exact official WVK_ID are on the
+    // same NWB road section. Treat that as directly reachable even when that
+    // edge was omitted from the downloaded graph (for example because its
+    // traffic-direction metadata is incomplete). This is safer than sending
+    // the route around a large loop merely because the graph is sparse.
+    if (fromWvkId === toWvkId) {
+      const edge = this.edges.get(fromWvkId);
+      const distanceKm = edge ? Math.max(.05, edge.lengthKm * .25) : .1;
+      return { reachable: true, distanceKm: Math.round(distanceKm * 10) / 10, etaMinutes: Math.round((distanceKm / 90 * 60 + 1) * 10) / 10, wvkPath: [fromWvkId], visitedNodes: 1 };
+    }
+
     const from = this.edges.get(fromWvkId);
     const to = this.edges.get(toWvkId);
     if (!from || !to) return { reachable: false, distanceKm: null, etaMinutes: null, wvkPath: [], visitedNodes: 0 };
-    if (fromWvkId === toWvkId) {
-      const distanceKm = Math.max(.05, from.lengthKm * .25);
-      return { reachable: true, distanceKm: Math.round(distanceKm * 10) / 10, etaMinutes: Math.round((distanceKm / 90 * 60 + 1) * 10) / 10, wvkPath: [fromWvkId], visitedNodes: 1 };
-    }
     const starts = this.departures(from);
     const targets = this.arrivals(to);
     if (!starts.length || !targets.length) return { reachable: false, distanceKm: null, etaMinutes: null, wvkPath: [], visitedNodes: 0 };
